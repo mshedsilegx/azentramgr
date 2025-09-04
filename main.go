@@ -11,18 +11,10 @@ import (
 )
 
 func main() {
-	// 1. Set up Interactive (Browser) Credentials
-	// Replace with your Entra ID tenant ID and the Client ID of your registered application.
-	// You can find these in the Azure portal under your app registration's "Overview" blade.
-	tenantID := os.Getenv("AZURE_TENANT_ID")
-	clientID := os.Getenv("AZURE_CLIENT_ID")
-
-	cred, err := azidentity.NewInteractiveBrowserCredential(
-		&azidentity.InteractiveBrowserCredentialOptions{
-			ClientID: clientID,
-			TenantID: tenantID,
-		},
-	)
+	// 1. Set up Azure CLI credentials.
+	// This credential type uses the user's Azure CLI login session.
+	// Run `az login` to authenticate with the Azure CLI.
+	cred, err := azidentity.NewAzureCLICredential(nil)
 	if err != nil {
 		fmt.Printf("Error creating credential: %v\n", err)
 		os.Exit(1)
