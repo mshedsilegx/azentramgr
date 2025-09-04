@@ -11,14 +11,14 @@ import (
 )
 
 func main() {
-	// 1. Set up Interactive (Device Code) Credentials
+	// 1. Set up Interactive (Browser) Credentials
 	// Replace with your Entra ID tenant ID and the Client ID of your registered application.
 	// You can find these in the Azure portal under your app registration's "Overview" blade.
 	tenantID := os.Getenv("AZURE_TENANT_ID")
 	clientID := os.Getenv("AZURE_CLIENT_ID")
 
-	cred, err := azidentity.NewDeviceCodeCredential(
-		&azidentity.DeviceCodeCredentialOptions{
+	cred, err := azidentity.NewInteractiveBrowserCredential(
+		&azidentity.InteractiveBrowserCredentialOptions{
 			ClientID: clientID,
 			TenantID: tenantID,
 		},
