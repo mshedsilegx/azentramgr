@@ -65,9 +65,7 @@ type Extractor struct {
 }
 
 // NewExtractor creates and initializes a new Extractor.
-func NewExtractor(config Config) (*Extractor, error) {
-	ctx := context.Background()
-
+func NewExtractor(ctx context.Context, config Config, client *msgraphsdk.GraphServiceClient, db *sql.DB, tenantID string) (*Extractor, error) {
 	// Compile regex
 	var groupFilter *regexp.Regexp
 	if config.GroupFilterRegex != "" {
@@ -77,31 +75,6 @@ func NewExtractor(config Config) (*Extractor, error) {
 			return nil, fmt.Errorf("error compiling group filter regex: %w", err)
 		}
 		log.Printf("Filtering groups by regex: %s", config.GroupFilterRegex)
-	}
-
-	// Authenticate
-	cred, err := azidentity.NewAzureCLICredential(nil)
-	if err != nil {
-		return nil, fmt.Errorf("error creating credential: %w", err)
-	}
-
-	// Create Graph client
-	client, err := msgraphsdk.NewGraphServiceClientWithCredentials(cred, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error creating Graph client: %w", err)
-	}
-
-	// Get Tenant ID for DB naming
-	tenantID, err := getTenantID(ctx, cred)
-	if err != nil {
-		return nil, fmt.Errorf("error getting tenant ID: %w", err)
-	}
-	dbName := fmt.Sprintf("%s_%s.db", tenantID, time.Now().Format("20060102-150405"))
-
-	// Setup SQLite Database
-	db, err := setupDatabase(ctx, dbName)
-	if err != nil {
-		return nil, fmt.Errorf("error setting up database: %w", err)
 	}
 
 	return &Extractor{
@@ -119,56 +92,21 @@ func NewExtractor(config Config) (*Extractor, error) {
 func (e *Extractor) Run() error {
 	defer e.db.Close()
 
-	// 1. Get total count of ALL groups in the tenant for the scanning progress bar.
+	// 1. Get total count of ALL groups for progress reporting.
+	// This is an estimate if a filter is used.
 	totalGroupsInTenant, err := e.getGroupCount()
 	if err != nil {
 		return fmt.Errorf("could not get total group count: %w", err)
 	}
 	log.Printf("Found %d total groups in tenant. Starting scan...", totalGroupsInTenant)
 
-	// 2. Phase 1: Scan all groups and collect the ones matching the filter.
-	var matchedGroups []*models.Group
-	pageIterator, err := e.getGroupIterator()
-	if err != nil {
-		return fmt.Errorf("failed to get group iterator: %w", err)
-	}
-
-	scannedCount := 0
-	err = pageIterator.Iterate(e.ctx, func(group *models.Group) bool {
-		scannedCount++
-		if scannedCount%100 == 0 { // Log progress every 100 groups
-			log.Printf("Scanning groups... [%d/%d]", scannedCount, totalGroupsInTenant)
-		}
-
-		if e.groupFilter == nil || (group.GetDisplayName() != nil && e.groupFilter.MatchString(*group.GetDisplayName())) {
-			matchedGroups = append(matchedGroups, group)
-		}
-		return true
-	})
-	if err != nil {
-		return fmt.Errorf("error during group scan: %w", err)
-	}
-
-	e.totalGroups = len(matchedGroups)
-	log.Printf("Scan complete. Found %d matching groups.", e.totalGroups)
-
-	// 3. Print the detailed startup message.
-	log.Printf(
-		"Extraction of JSON file: %s is started - Entra ID: %s - Date: %s - Number of groups to process: %d",
-		e.config.JsonOutputFile,
-		e.tenantID,
-		time.Now().Format("2006-01-02"),
-		e.totalGroups,
-	)
-
-	// 4. Setup channels and wait groups for concurrent processing
+	// 2. Setup channels and wait groups for concurrent processing
 	groupTasks := make(chan *models.Group, 100)
 	jsonResults := make(chan JSONGroup, 100)
 	sqliteResults := make(chan SQLiteGroupMember, 100)
-	var workersWg sync.WaitGroup
-	var aggregatorsWg sync.WaitGroup
+	var workersWg, aggregatorsWg sync.WaitGroup
 
-	// 5. Start workers and aggregators
+	// 3. Start workers and result aggregators
 	numWorkers := runtime.NumCPU()
 	for i := 0; i < numWorkers; i++ {
 		workersWg.Add(1)
@@ -179,24 +117,53 @@ func (e *Extractor) Run() error {
 	aggregatorsWg.Add(1)
 	go e.streamJsonToFile(&aggregatorsWg, jsonResults)
 
-	// 6. Start a goroutine to close result channels once workers are done
+	// 4. Goroutine to close result channels once all workers are done
 	go func() {
 		workersWg.Wait()
 		close(jsonResults)
 		close(sqliteResults)
 	}()
 
-	// 7. Dispatch matched groups to workers
-	log.Println("Dispatching matched groups to workers for member extraction...")
-	for _, group := range matchedGroups {
-		groupTasks <- group
-	}
-	close(groupTasks)
-	log.Println("Finished dispatching all matched groups.")
+	// 5. Create a new WaitGroup for the dispatcher and run it in a goroutine
+	var dispatcherWg sync.WaitGroup
+	dispatcherWg.Add(1)
+	go func() {
+		defer dispatcherWg.Done()
+		defer close(groupTasks) // Close channel when iteration is done
 
-	// 8. Wait for aggregators to finish
+		pageIterator, err := e.getGroupIterator()
+		if err != nil {
+			log.Printf("Error getting group iterator: %v", err)
+			return
+		}
+
+		scannedCount := 0
+		matchingCount := 0
+		err = pageIterator.Iterate(e.ctx, func(group *models.Group) bool {
+			scannedCount++
+			if scannedCount%100 == 0 {
+				log.Printf("Scanning groups... [%d/%d]", scannedCount, totalGroupsInTenant)
+			}
+
+			if e.groupFilter == nil || (group.GetDisplayName() != nil && e.groupFilter.MatchString(*group.GetDisplayName())) {
+				matchingCount++
+				groupTasks <- group
+			}
+			return true
+		})
+		if err != nil {
+			log.Printf("Error during group scan: %v", err)
+		}
+		e.totalGroups = matchingCount // Set the final count for accurate percentage
+		log.Printf("Scan complete. Found and dispatched %d matching groups for processing.", matchingCount)
+	}()
+
+	// 6. Wait for the dispatcher to finish sending all groups, then wait for aggregators
+	dispatcherWg.Wait()
+	log.Println("Finished dispatching all matched groups.")
 	aggregatorsWg.Wait()
 	log.Println("Finished aggregating all results.")
+
 	return nil
 }
 
@@ -317,39 +284,57 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 			continue
 		}
 
-		result, err := e.client.Groups().ByGroupId(groupID).Members().Get(e.ctx, nil)
+		// Fetch the first page of members
+		membersCollection, err := e.client.Groups().ByGroupId(groupID).Members().Get(e.ctx, nil)
 		if err != nil {
 			log.Printf("Error fetching members for group %s (%s): %v", groupName, groupID, err)
+			jsonResults <- JSONGroup{ADGroupName: groupName} // Send group name even if member fetch fails
+			continue
+		}
+
+		var memberNames []string
+		// Create a PageIterator for the members
+		memberIterator, err := msgraphgocore.NewPageIterator[models.DirectoryObjectable](membersCollection, e.client.GetAdapter(), models.CreateDirectoryObjectCollectionResponseFromDiscriminatorValue)
+		if err != nil {
+			log.Printf("Error creating member iterator for group %s (%s): %v", groupName, groupID, err)
 			jsonResults <- JSONGroup{ADGroupName: groupName}
 			continue
 		}
 
-		members := result.GetValue()
-		var memberNames []string
-		if len(members) > 0 {
-			for _, member := range members {
-				switch m := member.(type) {
-				case models.Userable:
-					if m.GetDisplayName() != nil {
-						memberName := *m.GetDisplayName()
-						memberNames = append(memberNames, memberName)
-						sqliteResults <- SQLiteGroupMember{GroupName: groupName, MemberName: memberName}
-					}
-				case models.Groupable:
-					if m.GetDisplayName() != nil {
-						memberName := *m.GetDisplayName() + " (Group)"
-						memberNames = append(memberNames, memberName)
-						sqliteResults <- SQLiteGroupMember{GroupName: groupName, MemberName: memberName}
-					}
-				case models.ServicePrincipalable:
-					if m.GetDisplayName() != nil {
-						memberName := *m.GetDisplayName() + " (ServicePrincipal)"
-						memberNames = append(memberNames, memberName)
-						sqliteResults <- SQLiteGroupMember{GroupName: groupName, MemberName: memberName}
-					}
+		// Iterate over all pages of members
+		err = memberIterator.Iterate(e.ctx, func(member models.DirectoryObjectable) bool {
+			var memberName string
+			memberType := ""
+
+			switch m := member.(type) {
+			case models.Userable:
+				if m.GetDisplayName() != nil {
+					memberName = *m.GetDisplayName()
+				}
+			case models.Groupable:
+				if m.GetDisplayName() != nil {
+					memberName = *m.GetDisplayName()
+					memberType = " (Group)"
+				}
+			case models.ServicePrincipalable:
+				if m.GetDisplayName() != nil {
+					memberName = *m.GetDisplayName()
+					memberType = " (ServicePrincipal)"
 				}
 			}
+
+			if memberName != "" {
+				fullMemberName := memberName + memberType
+				memberNames = append(memberNames, fullMemberName)
+				sqliteResults <- SQLiteGroupMember{GroupName: groupName, MemberName: fullMemberName}
+			}
+			return true // Continue iterating
+		})
+		if err != nil {
+			log.Printf("Error iterating members for group %s (%s): %v", groupName, groupID, err)
+			// Still send the group name to the JSON results, even if member iteration fails mid-way
 		}
+
 		jsonResults <- JSONGroup{ADGroupName: groupName, ADGroupMemberName: memberNames}
 	}
 }
@@ -449,8 +434,36 @@ func main() {
 		log.Fatalf("Error: pageSize must be between 1 and 999.")
 	}
 
+	// --- Application Setup ---
+	ctx := context.Background()
+
+	// Authenticate
+	cred, err := azidentity.NewAzureCLICredential(nil)
+	if err != nil {
+		log.Fatalf("Error creating credential: %v", err)
+	}
+
+	// Create Graph client
+	client, err := msgraphsdk.NewGraphServiceClientWithCredentials(cred, nil)
+	if err != nil {
+		log.Fatalf("Error creating Graph client: %v", err)
+	}
+
+	// Get Tenant ID for DB naming
+	tenantID, err := getTenantID(ctx, cred)
+	if err != nil {
+		log.Fatalf("Error getting tenant ID: %v", err)
+	}
+	dbName := fmt.Sprintf("%s_%s.db", tenantID, time.Now().Format("20060102-150405"))
+
+	// Setup SQLite Database
+	db, err := setupDatabase(ctx, dbName)
+	if err != nil {
+		log.Fatalf("Error setting up database: %v", err)
+	}
+
 	// Create and run the extractor
-	extractor, err := NewExtractor(config)
+	extractor, err := NewExtractor(ctx, config, client, db, tenantID)
 	if err != nil {
 		log.Fatalf("Failed to initialize extractor: %v", err)
 	}
