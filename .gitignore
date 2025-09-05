@@ -1,0 +1,5 @@
+# Ignore Go build output
+azentra
+
+# Ignore SQLite database files
+*.db
