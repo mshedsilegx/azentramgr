@@ -13,6 +13,9 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"time"
+
+	"golang.org/x/time/rate"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -61,7 +64,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error getting tenant ID: %v", err)
 	}
-	dbName := fmt.Sprintf("%s.db", tenantID)
+	dbName := fmt.Sprintf("%s_%s.db", tenantID, time.Now().Format("20060102-150405"))
 
 	// Setup SQLite Database
 	db, err := setupDatabase(ctx, dbName)
@@ -70,8 +73,8 @@ func main() {
 	}
 	defer db.Close()
 
-	// 2. Create the Microsoft Graph client
-	// This is the new, correct way to create the client in recent SDK versions.
+	// 2. Create the Microsoft Graph client.
+	// The default client pipeline includes a retry handler, so we don't need to add it manually.
 	client, err := msgraphsdk.NewGraphServiceClientWithCredentials(cred, nil)
 	if err != nil {
 		log.Fatalf("Error creating Graph client: %v", err)
@@ -119,9 +122,12 @@ func main() {
 	jsonResults := make(chan JSONGroup, 100)
 	sqliteResults := make(chan SQLiteGroupMember, 100)
 
+	// Rate limiter: 15 requests per second with a burst of 1.
+	limiter := rate.NewLimiter(rate.Limit(15), 1)
+
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go worker(ctx, client, &wg, groupTasks, jsonResults, sqliteResults)
+		go worker(ctx, client, &wg, limiter, groupTasks, jsonResults, sqliteResults)
 	}
 
 	// 8. Start a goroutine to wait for workers and then close the result channels
@@ -200,7 +206,7 @@ func processSQLiteInserts(ctx context.Context, db *sql.DB, results <-chan SQLite
 	return tx.Commit()
 }
 
-func worker(ctx context.Context, client *msgraphsdk.GraphServiceClient, wg *sync.WaitGroup, groupTasks <-chan *models.Group, jsonResults chan<- JSONGroup, sqliteResults chan<- SQLiteGroupMember) {
+func worker(ctx context.Context, client *msgraphsdk.GraphServiceClient, wg *sync.WaitGroup, limiter *rate.Limiter, groupTasks <-chan *models.Group, jsonResults chan<- JSONGroup, sqliteResults chan<- SQLiteGroupMember) {
 	defer wg.Done()
 	for group := range groupTasks {
 		// Defensive check: ensure the group and its properties are not nil.
@@ -212,6 +218,14 @@ func worker(ctx context.Context, client *msgraphsdk.GraphServiceClient, wg *sync
 		groupName := *group.GetDisplayName()
 
 		log.Printf("Fetching members for group: %s", groupName)
+
+		// Wait for the rate limiter before making an API call
+		if err := limiter.Wait(ctx); err != nil {
+			log.Printf("Error waiting for rate limiter: %v", err)
+			// If context is cancelled, we should stop.
+			jsonResults <- JSONGroup{ADGroupName: groupName}
+			continue
+		}
 
 		// Fetch members for the group
 		result, err := client.Groups().ByGroupId(groupID).Members().Get(ctx, nil)
