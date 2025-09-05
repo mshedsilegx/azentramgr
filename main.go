@@ -353,7 +353,9 @@ func getTenantID(ctx context.Context, cred *azidentity.AzureCLICredential) (stri
 }
 
 func setupDatabase(ctx context.Context, dbName string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", dbName)
+	// Add pragma for performance, accepting the risk of DB corruption on crash.
+	dsn := fmt.Sprintf("file:%s?_pragma=synchronous(OFF)", dbName)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
