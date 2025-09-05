@@ -30,6 +30,8 @@ import (
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 )
 
+var version = "dev"
+
 // JSONGroup represents the structure for each group in the final JSON output.
 type JSONGroup struct {
 	ADGroupName       string   `json:"ADGroupName"`
@@ -431,10 +433,16 @@ func setupDatabase(ctx context.Context, dbName string) (*sql.DB, error) {
 func main() {
 	// Define and parse flags
 	config := Config{}
+	versionFlag := flag.Bool("version", false, "Print the version and exit.")
 	flag.IntVar(&config.PageSize, "pageSize", 750, "The number of groups to retrieve per page. Max is 999.")
 	flag.StringVar(&config.JsonOutputFile, "output-file", "adgroupmembers.json", "The path to the output JSON file.")
 	flag.StringVar(&config.GroupFilterRegex, "group-filter-regex", "", "Optional regex to filter groups by name.")
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Println(version)
+		os.Exit(0)
+	}
 
 	// Validate flags
 	if config.PageSize > 999 || config.PageSize < 1 {
