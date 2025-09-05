@@ -34,7 +34,7 @@ Write-Host "Extraction of azureadgroupmembers is started"
 	
 
 2- Respect the generic rules below:
-2.1- run go get -u ./..., go mod tidy, go fmt ./... go vet ./... before committing. Do not build nor submit to github repo without approval.
+2.1- run go get -u ./..., go mod tidy, go fmt ./... go vet ./... before committing. Do not build nor submit to github repo without approval. Do not auto-approve plans.
 2.2- always optimize for performance by parallelizing as much as possible, and a very large number of objects
 2.3- Make sure are we not flooding the API with requests, and than a retry mechanism with exponential backoff is implemented to address any transient errors. Both would have best practice values.
 2.4- Only use well maintained, safe and production ready golang modules. Limit the use of third party libraries if possible, always prefer core libs.
