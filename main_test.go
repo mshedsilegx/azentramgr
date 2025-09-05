@@ -68,23 +68,8 @@ func TestSpecialCharacterHandlingInOutput(t *testing.T) {
 	require.NoError(t, err)
 
 	var outputGroups []JSONGroup
-	// The file is a stream `[\n { ... } \n]`, so we unmarshal the inner object
-	start, end := -1, -1
-	for i, b := range jsonContent {
-		if b == '{' && start == -1 {
-			start = i
-		}
-		if b == '}' {
-			end = i
-		}
-	}
-	require.NotEqual(t, -1, start, "Could not find opening brace in JSON output")
-	require.NotEqual(t, -1, end, "Could not find closing brace in JSON output")
-
-	var singleGroup JSONGroup
-	err = json.Unmarshal(jsonContent[start:end+1], &singleGroup)
-	require.NoError(t, err, "Failed to unmarshal JSON: %s", string(jsonContent))
-	outputGroups = []JSONGroup{singleGroup}
+	err = json.Unmarshal(jsonContent, &outputGroups)
+	require.NoError(t, err, "Failed to unmarshal JSON content: %s", string(jsonContent))
 
 	require.Len(t, outputGroups, 1)
 	assert.Equal(t, specialGroupName, outputGroups[0].ADGroupName)

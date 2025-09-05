@@ -20,7 +20,7 @@ The application's behavior can be customized with the following command-line fla
 |---|---|---|---|
 | `-version` | bool | `false` | Print the application version and exit. |
 | `-pageSize` | int | `500` | The number of items to retrieve per page for API queries (for both groups and members). Max is 999. |
-| `-output-file` | string | `adgroupmembers.json` | The path to the output JSON file. |
+| `-output-id` | string | `""` (dynamic) | Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID (`<tenant_id>_<timestamp>`) is generated. |
 | `-group-filter-regex` | string | `""` | Optional regex to filter groups by name. **Note:** Complex patterns can cause performance issues (ReDoS). |
 
 ## 3. Examples on How to Use
@@ -65,8 +65,9 @@ You can use the `-group-filter-regex` flag to be more selective about which grou
 ./azentra -group-filter-regex "^(FINANCE|HR)_"
 ```
 
-### Specifying an Output File
-To change the name of the output JSON file:
+### Specifying Output Filenames
+To provide a custom base name for the output `.json` and `.db` files:
 ```sh
-./azentra -output-file prod_groups.json
+# This will create "prod_export.json" and "prod_export.db"
+go run main.go -output-id prod_export
 ```

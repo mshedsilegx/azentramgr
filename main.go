@@ -47,8 +47,9 @@ type SQLiteGroupMember struct {
 // Config holds the configuration options for the extractor.
 type Config struct {
 	PageSize         int
-	JsonOutputFile   string
+	OutputID         string
 	GroupFilterRegex string
+	JsonOutputFile   string // The full path to the JSON output file
 }
 
 // Extractor holds the application's state and logic.
@@ -430,7 +431,7 @@ func main() {
 	config := Config{}
 	versionFlag := flag.Bool("version", false, "Print the version and exit.")
 	flag.IntVar(&config.PageSize, "pageSize", 500, "The number of items to retrieve per page for API queries. Max is 999.")
-	flag.StringVar(&config.JsonOutputFile, "output-file", "adgroupmembers.json", "The path to the output JSON file.")
+	flag.StringVar(&config.OutputID, "output-id", "", "Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID is generated.")
 	flag.StringVar(&config.GroupFilterRegex, "group-filter-regex", "", "Optional regex to filter groups by name. Note: complex patterns can cause performance issues (ReDoS).")
 	flag.Parse()
 
@@ -464,7 +465,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error getting tenant ID: %v", err)
 	}
-	dbName := fmt.Sprintf("%s_%s.db", tenantID, time.Now().Format("20060102-150405"))
+
+	// Determine base filename
+	var baseName string
+	if config.OutputID != "" {
+		baseName = config.OutputID
+	} else {
+		baseName = fmt.Sprintf("%s_%s", tenantID, time.Now().Format("20060102-150405"))
+	}
+
+	dbName := baseName + ".db"
+	config.JsonOutputFile = baseName + ".json"
 
 	// Setup SQLite Database
 	db, err := setupDatabase(ctx, dbName)
