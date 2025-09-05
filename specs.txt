@@ -40,6 +40,7 @@ Write-Host "Extraction of azureadgroupmembers is started"
 2.4- Only use well maintained, safe and production ready golang modules. Limit the use of third party libraries if possible, always prefer core libs.
 2.5- perform a code review for security, performance and modularity, and provide recommendations. Initiate memory recording.
 2.6- Make sure all inputs are sanitized.
+2.7- Implement a version string that defaults to dev, and is overwritten at compile time via -X main.version=<version>
 
 3- Application features
 3.1- Make the output json file location and name an argument. It defauls as: adgroupmembers.json in the current folder.
