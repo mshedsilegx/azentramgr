@@ -46,19 +46,34 @@ To run the extractor with default settings, which will fetch all groups in the t
 ```
 
 ### Filtering for Specific Groups
-To extract only groups whose names start with `PROD_`:
+You can use the `-group-filter-regex` flag to be more selective about which groups you extract. The filter uses standard Go regular expressions.
+
+**Example 1: Extract groups with a specific prefix**
 ```sh
+# Extracts all groups whose names start with "PROD_"
 ./azentra -group-filter-regex "^PROD_"
+```
+
+**Example 2: Extract groups with a specific suffix**
+```sh
+# Extracts all groups whose names end with "_DEV"
+./azentra -group-filter-regex "_DEV$"
+```
+
+**Example 3: Extract groups containing a certain keyword**
+```sh
+# Extracts all groups with "UAT" anywhere in the name
+./azentra -group-filter-regex "UAT"
+```
+
+**Example 4: Extract groups with multiple possible prefixes**
+```sh
+# Extracts groups starting with either "FINANCE_" or "HR_"
+./azentra -group-filter-regex "^(FINANCE|HR)_"
 ```
 
 ### Specifying an Output File
 To change the name of the output JSON file:
 ```sh
 ./azentra -output-file prod_groups.json
-```
-
-### Checking the Version
-To see the current version of the tool:
-```sh
-./azentra -version
 ```
