@@ -19,7 +19,7 @@ The application's behavior can be customized with the following command-line fla
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `-version` | bool | `false` | Print the application version and exit. |
-| `-pageSize` | int | `750` | The number of groups to retrieve per API page. Max is 999. |
+| `-pageSize` | int | `500` | The number of items to retrieve per page for API queries (for both groups and members). Max is 999. |
 | `-output-file` | string | `adgroupmembers.json` | The path to the output JSON file. |
 | `-group-filter-regex` | string | `""` | Optional regex to filter groups by name. **Note:** Complex patterns can cause performance issues (ReDoS). |
 
