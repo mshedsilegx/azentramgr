@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -22,6 +23,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	_ "github.com/glebarez/sqlite"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/microsoft/kiota-abstractions-go"
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
 	msgraphgocore "github.com/microsoftgraph/msgraph-sdk-go-core"
 	"github.com/microsoftgraph/msgraph-sdk-go/groups"
@@ -49,12 +51,15 @@ type Config struct {
 
 // Extractor holds the application's state and logic.
 type Extractor struct {
-	config      Config
-	ctx         context.Context
-	client      *msgraphsdk.GraphServiceClient
-	db          *sql.DB
-	limiter     *rate.Limiter
-	groupFilter *regexp.Regexp
+	config         Config
+	ctx            context.Context
+	client         *msgraphsdk.GraphServiceClient
+	db             *sql.DB
+	limiter        *rate.Limiter
+	groupFilter    *regexp.Regexp
+	tenantID       string
+	totalGroups    int
+	processedCount atomic.Int64
 }
 
 // NewExtractor creates and initializes a new Extractor.
@@ -104,6 +109,7 @@ func NewExtractor(config Config) (*Extractor, error) {
 		db:          db,
 		limiter:     rate.NewLimiter(rate.Limit(15), 1),
 		groupFilter: groupFilter,
+		tenantID:    tenantID,
 	}, nil
 }
 
@@ -111,28 +117,56 @@ func NewExtractor(config Config) (*Extractor, error) {
 func (e *Extractor) Run() error {
 	defer e.db.Close()
 
-	// 1. Get the first page of groups to initialize the iterator
-	initialResult, err := e.getGroupsWithLoginRetry()
+	// 1. Get total count of ALL groups in the tenant for the scanning progress bar.
+	totalGroupsInTenant, err := e.getGroupCount()
 	if err != nil {
-		return fmt.Errorf("failed to get initial group page: %w", err)
+		return fmt.Errorf("could not get total group count: %w", err)
 	}
-	result, ok := initialResult.(*models.GroupCollectionResponse)
-	if !ok {
-		return errors.New("could not perform type assertion on the Graph API result")
-	}
-	pageIterator, err := msgraphgocore.NewPageIterator[*models.Group](result, e.client.GetAdapter(), models.CreateGroupCollectionResponseFromDiscriminatorValue)
+	log.Printf("Found %d total groups in tenant. Starting scan...", totalGroupsInTenant)
+
+	// 2. Phase 1: Scan all groups and collect the ones matching the filter.
+	var matchedGroups []*models.Group
+	pageIterator, err := e.getGroupIterator()
 	if err != nil {
-		return fmt.Errorf("error creating page iterator: %w", err)
+		return fmt.Errorf("failed to get group iterator: %w", err)
 	}
 
-	// 2. Setup channels and wait groups for concurrent processing
+	scannedCount := 0
+	err = pageIterator.Iterate(e.ctx, func(group *models.Group) bool {
+		scannedCount++
+		if scannedCount%100 == 0 { // Log progress every 100 groups
+			log.Printf("Scanning groups... [%d/%d]", scannedCount, totalGroupsInTenant)
+		}
+
+		if e.groupFilter == nil || (group.GetDisplayName() != nil && e.groupFilter.MatchString(*group.GetDisplayName())) {
+			matchedGroups = append(matchedGroups, group)
+		}
+		return true
+	})
+	if err != nil {
+		return fmt.Errorf("error during group scan: %w", err)
+	}
+
+	e.totalGroups = len(matchedGroups)
+	log.Printf("Scan complete. Found %d matching groups.", e.totalGroups)
+
+	// 3. Print the detailed startup message.
+	log.Printf(
+		"Extraction of JSON file: %s is started - Entra ID: %s - Date: %s - Number of groups to process: %d",
+		e.config.JsonOutputFile,
+		e.tenantID,
+		time.Now().Format("2006-01-02"),
+		e.totalGroups,
+	)
+
+	// 4. Setup channels and wait groups for concurrent processing
 	groupTasks := make(chan *models.Group, 100)
 	jsonResults := make(chan JSONGroup, 100)
 	sqliteResults := make(chan SQLiteGroupMember, 100)
 	var workersWg sync.WaitGroup
 	var aggregatorsWg sync.WaitGroup
 
-	// 3. Start workers and aggregators
+	// 5. Start workers and aggregators
 	numWorkers := runtime.NumCPU()
 	for i := 0; i < numWorkers; i++ {
 		workersWg.Add(1)
@@ -143,34 +177,50 @@ func (e *Extractor) Run() error {
 	aggregatorsWg.Add(1)
 	go e.streamJsonToFile(&aggregatorsWg, jsonResults)
 
-	// 4. Start a goroutine to close result channels once workers are done
+	// 6. Start a goroutine to close result channels once workers are done
 	go func() {
 		workersWg.Wait()
 		close(jsonResults)
 		close(sqliteResults)
 	}()
 
-	// 5. Iterate over all groups and dispatch tasks
-	log.Println("Starting to retrieve groups...")
-	err = pageIterator.Iterate(e.ctx, func(group *models.Group) bool {
-		if e.groupFilter != nil {
-			if group.GetDisplayName() == nil || !e.groupFilter.MatchString(*group.GetDisplayName()) {
-				return true // Doesn't match, skip but continue iterating.
-			}
-		}
+	// 7. Dispatch matched groups to workers
+	log.Println("Dispatching matched groups to workers for member extraction...")
+	for _, group := range matchedGroups {
 		groupTasks <- group
-		return true // Continue iterating
-	})
-	if err != nil {
-		log.Printf("Error during group iteration: %v", err) // Log error but don't fail everything
 	}
-	close(groupTasks) // Close channel to signal that no more groups will be sent
-	log.Println("Finished retrieving all groups.")
+	close(groupTasks)
+	log.Println("Finished dispatching all matched groups.")
 
-	// 6. Wait for aggregators to finish
+	// 8. Wait for aggregators to finish
 	aggregatorsWg.Wait()
 	log.Println("Finished aggregating all results.")
 	return nil
+}
+
+func (e *Extractor) getGroupCount() (int32, error) {
+	headers := abstractions.NewRequestHeaders()
+	headers.Add("ConsistencyLevel", "eventual")
+	requestConfiguration := &groups.CountRequestBuilderGetRequestConfiguration{
+		Headers: headers,
+	}
+	count, err := e.client.Groups().Count().Get(e.ctx, requestConfiguration)
+	if err != nil {
+		return 0, err
+	}
+	return *count, nil
+}
+
+func (e *Extractor) getGroupIterator() (*msgraphgocore.PageIterator[*models.Group], error) {
+	initialResult, err := e.getGroupsWithLoginRetry()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get initial group page: %w", err)
+	}
+	result, ok := initialResult.(*models.GroupCollectionResponse)
+	if !ok {
+		return nil, errors.New("could not perform type assertion on the Graph API result")
+	}
+	return msgraphgocore.NewPageIterator[*models.Group](result, e.client.GetAdapter(), models.CreateGroupCollectionResponseFromDiscriminatorValue)
 }
 
 func (e *Extractor) streamJsonToFile(wg *sync.WaitGroup, results <-chan JSONGroup) {
@@ -255,7 +305,10 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 		groupID := *group.GetId()
 		groupName := *group.GetDisplayName()
 
-		log.Printf("Fetching members for group: %s", groupName)
+		currentCount := e.processedCount.Add(1)
+		percentage := (float64(currentCount) / float64(e.totalGroups)) * 100
+		log.Printf("[%d/%d] Data extraction for group %s [%.2f%%]", currentCount, e.totalGroups, groupName, percentage)
+
 		if err := e.limiter.Wait(e.ctx); err != nil {
 			log.Printf("Error waiting for rate limiter: %v", err)
 			jsonResults <- JSONGroup{ADGroupName: groupName}
