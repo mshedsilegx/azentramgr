@@ -381,6 +381,10 @@ func getTenantID(ctx context.Context, cred *azidentity.AzureCLICredential) (stri
 	}
 	parser := new(jwt.Parser)
 	claims := jwt.MapClaims{}
+	// Note: We use ParseUnverified because we don't need to validate the token's signature.
+	// We are only extracting the tenant ID claim ("tid") from a token that we have just
+	// received directly from Azure AD, which we trust as the source.
+	// This is NOT safe for authenticating incoming requests.
 	_, _, err = parser.ParseUnverified(token.Token, claims)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse token: %w", err)
@@ -421,7 +425,7 @@ func main() {
 	versionFlag := flag.Bool("version", false, "Print the version and exit.")
 	flag.IntVar(&config.PageSize, "pageSize", 750, "The number of groups to retrieve per page. Max is 999.")
 	flag.StringVar(&config.JsonOutputFile, "output-file", "adgroupmembers.json", "The path to the output JSON file.")
-	flag.StringVar(&config.GroupFilterRegex, "group-filter-regex", "", "Optional regex to filter groups by name.")
+	flag.StringVar(&config.GroupFilterRegex, "group-filter-regex", "", "Optional regex to filter groups by name. Note: complex patterns can cause performance issues (ReDoS).")
 	flag.Parse()
 
 	if *versionFlag {
