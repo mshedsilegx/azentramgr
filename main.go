@@ -285,7 +285,13 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 		}
 
 		// Fetch the first page of members
-		membersCollection, err := e.client.Groups().ByGroupId(groupID).Members().Get(e.ctx, nil)
+		requestParameters := &groups.ItemMembersRequestBuilderGetQueryParameters{
+			Top: int32Ptr(e.config.PageSize),
+		}
+		options := &groups.ItemMembersRequestBuilderGetRequestConfiguration{
+			QueryParameters: requestParameters,
+		}
+		membersCollection, err := e.client.Groups().ByGroupId(groupID).Members().Get(e.ctx, options)
 		if err != nil {
 			log.Printf("Error fetching members for group %s (%s): %v", groupName, groupID, err)
 			jsonResults <- JSONGroup{ADGroupName: groupName} // Send group name even if member fetch fails
@@ -423,7 +429,7 @@ func main() {
 	// Define and parse flags
 	config := Config{}
 	versionFlag := flag.Bool("version", false, "Print the version and exit.")
-	flag.IntVar(&config.PageSize, "pageSize", 750, "The number of groups to retrieve per page. Max is 999.")
+	flag.IntVar(&config.PageSize, "pageSize", 500, "The number of items to retrieve per page for API queries. Max is 999.")
 	flag.StringVar(&config.JsonOutputFile, "output-file", "adgroupmembers.json", "The path to the output JSON file.")
 	flag.StringVar(&config.GroupFilterRegex, "group-filter-regex", "", "Optional regex to filter groups by name. Note: complex patterns can cause performance issues (ReDoS).")
 	flag.Parse()
