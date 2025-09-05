@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -181,18 +182,21 @@ func (e *Extractor) streamJsonToFile(wg *sync.WaitGroup, results <-chan JSONGrou
 	}
 	defer file.Close()
 
-	if _, err := file.WriteString("[\n"); err != nil {
+	writer := bufio.NewWriter(file)
+	defer writer.Flush() // Important: ensure buffer is written at the end
+
+	if _, err := writer.WriteString("[\n"); err != nil {
 		log.Printf("Error writing opening bracket to JSON file: %v", err)
 		return
 	}
 
-	encoder := json.NewEncoder(file)
+	encoder := json.NewEncoder(writer)
 	encoder.SetIndent("", "  ")
 
 	isFirst := true
 	for res := range results {
 		if !isFirst {
-			if _, err := file.WriteString(",\n"); err != nil {
+			if _, err := writer.WriteString(",\n"); err != nil {
 				log.Printf("Error writing comma to JSON file: %v", err)
 				continue
 			}
@@ -203,7 +207,7 @@ func (e *Extractor) streamJsonToFile(wg *sync.WaitGroup, results <-chan JSONGrou
 		}
 	}
 
-	if _, err := file.WriteString("\n]"); err != nil {
+	if _, err := writer.WriteString("\n]"); err != nil {
 		log.Printf("Error writing closing bracket to JSON file: %v", err)
 	}
 	log.Printf("Successfully wrote JSON output to %s", e.config.JsonOutputFile)
