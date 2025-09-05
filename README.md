@@ -32,17 +32,10 @@ You must be authenticated with Azure. Run the following command and complete the
 az login
 ```
 
-### Building the Application
-It is recommended to build the binary before running it for the best performance.
-```sh
-go build .
-```
-This will create an executable named `azentra` (or `azentra.exe` on Windows).
-
 ### Basic Usage
 To run the extractor with default settings, which will fetch all groups in the tenant:
 ```sh
-./azentra
+go run main.go
 ```
 
 ### Filtering for Specific Groups
