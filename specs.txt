@@ -31,7 +31,14 @@ Write-Host "Extraction of azureadgroupmembers is started"
     catch{
       Write-Output "Issue with GroupMembers Listing" | out-file -encoding unicode -filepath "adgroupmembers.json"
     }
-	
+
+User record:
+    "givenName": "XXXX",
+    "mail": XXXX,
+    "surname": "XXXX",
+    "userPrincipalName": "XXXX"
+
+
 
 2- Respect the generic rules below:
 2.1- run go get -u ./..., go mod tidy, go fmt ./... go vet ./... before committing. Do not build nor submit to github repo without approval. Do not auto-approve plans.
@@ -45,8 +52,8 @@ Write-Host "Extraction of azureadgroupmembers is started"
 
 3- Application features
 3.1- Make the output json file location and name an argument. It defauls as: adgroupmembers.json in the current folder.
-3.2- Produce also a sqlite (use pure golang driver, no C dependencies) file called <entra_tenant_id>_YYYYMMDD-hhmmss.db with the following table name entraGroups.
-     field structure
+3.2- Produce also a sqlite (use pure golang driver, no C dependencies) file called <entra_tenant_id>_YYYYMMDD-hhmmss.db with the following table names
+     entraGroups
      ----------+-------------
      groupName | groupMember
      ----------+-------------
@@ -54,6 +61,15 @@ Write-Host "Extraction of azureadgroupmembers is started"
      select groupName from entraGroups where groupMember like "<name_of_member>%" where 
      and 
      select groupmember from entraGroups where groupName like "<name_of_group>%"
+
+     groupMember is the UserPrincipalName
+	 
+	 entraUsers
+	 ------------------+-----------+------+---------
+     UserPrincipalName | givenName | mail | surname
+     ------------------+-----------+------+---------
+     with an index on UserPrincipalName
+	
 
 3.3- generate both json file (with a streaming encoder, with explicit write buffering) and sqlite db in parallel, to minimize memory usage
      For sqlite inserts, implement a large transaction commit for bulk inserts, disable synchronous writes, and use prepared statements.
