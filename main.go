@@ -267,6 +267,34 @@ func (e *Extractor) processSQLiteInserts(wg *sync.WaitGroup, results <-chan SQLi
 	}
 }
 
+func (e *Extractor) processMembers(members []models.DirectoryObjectable) []string {
+	var memberNames []string
+	for _, member := range members {
+		var memberName, memberType string
+		switch m := member.(type) {
+		case models.Userable:
+			if u := m.GetDisplayName(); u != nil {
+				memberName = *u
+			}
+		case models.Groupable:
+			if g := m.GetDisplayName(); g != nil {
+				memberName = *g
+				memberType = " (Group)"
+			}
+		case models.ServicePrincipalable:
+			if s := m.GetDisplayName(); s != nil {
+				memberName = *s
+				memberType = " (ServicePrincipal)"
+			}
+		}
+		if memberName != "" {
+			fullName := memberName + memberType
+			memberNames = append(memberNames, fullName)
+		}
+	}
+	return memberNames
+}
+
 func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, jsonResults chan<- JSONGroup, sqliteResults chan<- SQLiteGroupMember) {
 	defer wg.Done()
 	for group := range groupTasks {
@@ -274,9 +302,9 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 			log.Println("Warning: received a nil group or group with nil ID/DisplayName. Skipping.")
 			continue
 		}
-		groupID := *group.GetId()
 		groupName := *group.GetDisplayName()
 
+		// Optimistic Logging
 		currentCount := e.processedCount.Add(1)
 		if e.countIsReady.Load() {
 			total := e.totalGroups.Load()
@@ -284,83 +312,71 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 				percentage := (float64(currentCount) / float64(total)) * 100
 				log.Printf("[%d/%d] Data extraction for group %s [%.2f%%]", currentCount, total, groupName, percentage)
 			} else {
-				// Fallback for case where count is ready but zero (e.g., no matching groups)
 				log.Printf("[Processed: %d] Data extraction for group %s", currentCount, groupName)
 			}
 		} else {
 			log.Printf("[Processed: %d] Data extraction for group %s", currentCount, groupName)
 		}
 
-		if err := e.limiter.Wait(e.ctx); err != nil {
-			log.Printf("Error waiting for rate limiter: %v", err)
-			jsonResults <- JSONGroup{ADGroupName: groupName}
-			continue
+		var allMemberNames []string
+
+		// Process the first page of members that came with the $expand query
+		if group.GetMembers() != nil {
+			processedNames := e.processMembers(group.GetMembers())
+			allMemberNames = append(allMemberNames, processedNames...)
+			for _, name := range processedNames {
+				sqliteResults <- SQLiteGroupMember{GroupName: groupName, MemberName: name}
+			}
 		}
 
-		// Fetch the first page of members
-		requestParameters := &groups.ItemMembersRequestBuilderGetQueryParameters{
-			Top: int32Ptr(e.config.PageSize),
-		}
-		options := &groups.ItemMembersRequestBuilderGetRequestConfiguration{
-			QueryParameters: requestParameters,
-		}
-		membersCollection, err := e.client.Groups().ByGroupId(groupID).Members().Get(e.ctx, options)
-		if err != nil {
-			log.Printf("Error fetching members for group %s (%s): %v", groupName, groupID, err)
-			jsonResults <- JSONGroup{ADGroupName: groupName} // Send group name even if member fetch fails
-			continue
+		// Check for subsequent pages of members and process them
+		var nextLink *string
+		if val, ok := group.GetAdditionalData()["members@odata.nextLink"]; ok && val != nil {
+			if s, ok := val.(*string); ok {
+				nextLink = s
+			}
 		}
 
-		var memberNames []string
-		// Create a PageIterator for the members
-		memberIterator, err := msgraphgocore.NewPageIterator[models.DirectoryObjectable](membersCollection, e.client.GetAdapter(), models.CreateDirectoryObjectCollectionResponseFromDiscriminatorValue)
-		if err != nil {
-			log.Printf("Error creating member iterator for group %s (%s): %v", groupName, groupID, err)
-			jsonResults <- JSONGroup{ADGroupName: groupName}
-			continue
-		}
+		if nextLink != nil && *nextLink != "" {
+			// Create a fake collection response to initialize the iterator with the nextLink
+			fakeCollection := models.NewDirectoryObjectCollectionResponse()
+			fakeCollection.SetOdataNextLink(nextLink)
 
-		// Iterate over all pages of members
-		err = memberIterator.Iterate(e.ctx, func(member models.DirectoryObjectable) bool {
-			var memberName string
-			memberType := ""
-
-			switch m := member.(type) {
-			case models.Userable:
-				if m.GetDisplayName() != nil {
-					memberName = *m.GetDisplayName()
-				}
-			case models.Groupable:
-				if m.GetDisplayName() != nil {
-					memberName = *m.GetDisplayName()
-					memberType = " (Group)"
-				}
-			case models.ServicePrincipalable:
-				if m.GetDisplayName() != nil {
-					memberName = *m.GetDisplayName()
-					memberType = " (ServicePrincipal)"
+			pageIterator, err := msgraphgocore.NewPageIterator[models.DirectoryObjectable](
+				fakeCollection,
+				e.client.GetAdapter(),
+				models.CreateDirectoryObjectCollectionResponseFromDiscriminatorValue,
+			)
+			if err != nil {
+				log.Printf("Error creating page iterator for group %s members nextLink: %v", groupName, err)
+			} else {
+				// Iterate over the remaining pages
+				err := pageIterator.Iterate(e.ctx, func(member models.DirectoryObjectable) bool {
+					if err := e.limiter.Wait(e.ctx); err != nil {
+						log.Printf("Error waiting for rate limiter while paginating members for group %s: %v", groupName, err)
+						return false
+					}
+					processedNames := e.processMembers([]models.DirectoryObjectable{member})
+					allMemberNames = append(allMemberNames, processedNames...)
+					for _, name := range processedNames {
+						sqliteResults <- SQLiteGroupMember{GroupName: groupName, MemberName: name}
+					}
+					return true
+				})
+				if err != nil {
+					log.Printf("Error iterating members for group %s: %v", groupName, err)
 				}
 			}
-
-			if memberName != "" {
-				fullMemberName := memberName + memberType
-				memberNames = append(memberNames, fullMemberName)
-				sqliteResults <- SQLiteGroupMember{GroupName: groupName, MemberName: fullMemberName}
-			}
-			return true // Continue iterating
-		})
-		if err != nil {
-			log.Printf("Error iterating members for group %s (%s): %v", groupName, groupID, err)
-			// Still send the group name to the JSON results, even if member iteration fails mid-way
 		}
 
-		jsonResults <- JSONGroup{ADGroupName: groupName, ADGroupMemberName: memberNames}
+		jsonResults <- JSONGroup{ADGroupName: groupName, ADGroupMemberName: allMemberNames}
 	}
 }
 
 func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseable, error) {
 	requestParameters := &groups.GroupsRequestBuilderGetQueryParameters{
 		Select:  []string{"displayName", "id"},
+		Expand:  []string{"members"},
 		Orderby: []string{"displayName asc"},
 		Top:     int32Ptr(e.config.PageSize),
 	}
