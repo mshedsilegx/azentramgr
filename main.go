@@ -61,8 +61,9 @@ type Extractor struct {
 	limiter        *rate.Limiter
 	groupFilter    *regexp.Regexp
 	tenantID       string
-	totalGroups    int
+	totalGroups    atomic.Int64
 	processedCount atomic.Int64
+	countIsReady   atomic.Bool
 }
 
 // NewExtractor creates and initializes a new Extractor.
@@ -142,7 +143,7 @@ func (e *Extractor) Run() error {
 		matchingCount := 0
 		err = pageIterator.Iterate(e.ctx, func(group *models.Group) bool {
 			scannedCount++
-			if scannedCount%100 == 0 {
+			if scannedCount%500 == 0 {
 				log.Printf("Scanning groups... [%d/%d]", scannedCount, totalGroupsInTenant)
 			}
 
@@ -155,7 +156,8 @@ func (e *Extractor) Run() error {
 		if err != nil {
 			log.Printf("Error during group scan: %v", err)
 		}
-		e.totalGroups = matchingCount // Set the final count for accurate percentage
+		e.totalGroups.Store(int64(matchingCount))
+		e.countIsReady.Store(true)
 		log.Printf("Scan complete. Found and dispatched %d matching groups for processing.", matchingCount)
 	}()
 
@@ -276,8 +278,18 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 		groupName := *group.GetDisplayName()
 
 		currentCount := e.processedCount.Add(1)
-		percentage := (float64(currentCount) / float64(e.totalGroups)) * 100
-		log.Printf("[%d/%d] Data extraction for group %s [%.2f%%]", currentCount, e.totalGroups, groupName, percentage)
+		if e.countIsReady.Load() {
+			total := e.totalGroups.Load()
+			if total > 0 {
+				percentage := (float64(currentCount) / float64(total)) * 100
+				log.Printf("[%d/%d] Data extraction for group %s [%.2f%%]", currentCount, total, groupName, percentage)
+			} else {
+				// Fallback for case where count is ready but zero (e.g., no matching groups)
+				log.Printf("[Processed: %d] Data extraction for group %s", currentCount, groupName)
+			}
+		} else {
+			log.Printf("[Processed: %d] Data extraction for group %s", currentCount, groupName)
+		}
 
 		if err := e.limiter.Wait(e.ctx); err != nil {
 			log.Printf("Error waiting for rate limiter: %v", err)
