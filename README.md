@@ -35,7 +35,7 @@ az login
 ### Basic Usage
 To run the extractor with default settings, which will fetch all groups in the tenant:
 ```sh
-go run main.go
+./azentra
 ```
 
 ### Filtering for Specific Groups
