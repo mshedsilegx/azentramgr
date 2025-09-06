@@ -2,7 +2,7 @@
 
 ## 1. Application Overview and Objectives
 
-`azentra` is a command-line tool for extracting group and member information from an Azure Active Directory (Entra ID) tenant. Its primary objective is to provide an efficient and reliable way to export Azure AD group memberships for analysis, auditing, or reporting purposes.
+`azentra` is a command-line tool for extracting group and member information (first and last name, email, userprincipalname) from an Azure Active Directory (Entra ID) tenant. Its primary objective is to provide an efficient and reliable way to export Azure AD group memberships for analysis, auditing, or reporting purposes.
 
 The tool connects to the Microsoft Graph API using your local Azure CLI credentials (`az login`). It fetches all groups, with an option to filter them by name using a regular expression, and then retrieves all members for each of those groups.
 
@@ -27,7 +27,7 @@ The application's behavior can be customized with the following command-line fla
 
 ### Prerequisites
 
-You must be authenticated with Azure. Run the following command and complete the login process before using the tool:
+Microsoft Azure Cli must be installed and available. You must be authenticated with Azure. Run the following command and complete the login process before using the extraction tool:
 ```sh
 az login
 ```
@@ -69,5 +69,5 @@ You can use the `-group-filter-regex` flag to be more selective about which grou
 To provide a custom base name for the output `.json` and `.db` files:
 ```sh
 # This will create "prod_export.json" and "prod_export.db"
-go run main.go -output-id prod_export
+./azentra -output-id prod_export
 ```
