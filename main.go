@@ -109,7 +109,7 @@ func (e *Extractor) Run() error {
 	var workersWg, aggregatorsWg sync.WaitGroup
 
 	// 3. Start workers and result aggregators
-	numWorkers := runtime.NumCPU()
+	numWorkers := runtime.NumCPU() * 8
 	for i := 0; i < numWorkers; i++ {
 		workersWg.Add(1)
 		go e.worker(&workersWg, groupTasks, jsonResults, sqliteResults)
@@ -376,7 +376,7 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseable, error) {
 	requestParameters := &groups.GroupsRequestBuilderGetQueryParameters{
 		Select:  []string{"displayName", "id"},
-		Expand:  []string{"members"},
+		Expand:  []string{fmt.Sprintf("members($top=%d)", e.config.PageSize)},
 		Orderby: []string{"displayName asc"},
 		Top:     int32Ptr(e.config.PageSize),
 	}
