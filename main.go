@@ -32,16 +32,32 @@ import (
 
 var version = "dev"
 
+// JSONMember represents the detailed structure for a user member in the JSON output.
+type JSONMember struct {
+	GivenName         string `json:"givenName,omitempty"`
+	Mail              string `json:"mail,omitempty"`
+	Surname           string `json:"surname,omitempty"`
+	UserPrincipalName string `json:"userPrincipalName"`
+}
+
 // JSONGroup represents the structure for each group in the final JSON output.
 type JSONGroup struct {
-	ADGroupName       string   `json:"ADGroupName"`
-	ADGroupMemberName []string `json:"ADGroupMemberName,omitempty"` // Use omitempty to hide if nil/empty
+	ADGroupName       string       `json:"ADGroupName"`
+	ADGroupMemberName []JSONMember `json:"ADGroupMemberName,omitempty"` // Use omitempty to hide if nil/empty
 }
 
 // SQLiteGroupMember represents a single row in the SQLite database.
 type SQLiteGroupMember struct {
 	GroupName  string
-	MemberName string
+	MemberName string // This will now store the UserPrincipalName for users
+}
+
+// SQLiteUser represents a single row in the new entraUsers table.
+type SQLiteUser struct {
+	UserPrincipalName string
+	GivenName         string
+	Mail              string
+	Surname           string
 }
 
 // Config holds the configuration options for the extractor.
@@ -106,16 +122,19 @@ func (e *Extractor) Run() error {
 	groupTasks := make(chan *models.Group, 100)
 	jsonResults := make(chan JSONGroup, 100)
 	sqliteResults := make(chan SQLiteGroupMember, 100)
+	userTasks := make(chan SQLiteUser, 100)
 	var workersWg, aggregatorsWg sync.WaitGroup
 
 	// 3. Start workers and result aggregators
-	numWorkers := runtime.NumCPU() * 8
+	numWorkers := runtime.NumCPU() * 16
 	for i := 0; i < numWorkers; i++ {
 		workersWg.Add(1)
-		go e.worker(&workersWg, groupTasks, jsonResults, sqliteResults)
+		go e.worker(&workersWg, groupTasks, jsonResults, sqliteResults, userTasks)
 	}
 	aggregatorsWg.Add(1)
 	go e.processSQLiteInserts(&aggregatorsWg, sqliteResults)
+	aggregatorsWg.Add(1)
+	go e.processUserInserts(&aggregatorsWg, userTasks)
 	aggregatorsWg.Add(1)
 	go e.streamJsonToFile(&aggregatorsWg, jsonResults)
 
@@ -124,6 +143,7 @@ func (e *Extractor) Run() error {
 		workersWg.Wait()
 		close(jsonResults)
 		close(sqliteResults)
+		close(userTasks)
 	}()
 
 	// 5. Create a new WaitGroup for the dispatcher and run it in a goroutine
@@ -267,35 +287,58 @@ func (e *Extractor) processSQLiteInserts(wg *sync.WaitGroup, results <-chan SQLi
 	}
 }
 
-func (e *Extractor) processMembers(members []models.DirectoryObjectable) []string {
-	var memberNames []string
+func (e *Extractor) processMembers(members []models.DirectoryObjectable) ([]JSONMember, []SQLiteUser, []string) {
+	var jsonMembers []JSONMember
+	var sqliteUsers []SQLiteUser
+	var groupMemberLinks []string
+
 	for _, member := range members {
-		var memberName, memberType string
 		switch m := member.(type) {
 		case models.Userable:
-			if u := m.GetDisplayName(); u != nil {
-				memberName = *u
+			upn := ""
+			if val := m.GetUserPrincipalName(); val != nil {
+				upn = *val
 			}
-		case models.Groupable:
-			if g := m.GetDisplayName(); g != nil {
-				memberName = *g
-				memberType = " (Group)"
+			if upn == "" {
+				continue // Skip users without a UPN
 			}
-		case models.ServicePrincipalable:
-			if s := m.GetDisplayName(); s != nil {
-				memberName = *s
-				memberType = " (ServicePrincipal)"
+
+			givenName := ""
+			if val := m.GetGivenName(); val != nil {
+				givenName = *val
 			}
-		}
-		if memberName != "" {
-			fullName := memberName + memberType
-			memberNames = append(memberNames, fullName)
+			mail := ""
+			if val := m.GetMail(); val != nil {
+				mail = *val
+			}
+			surname := ""
+			if val := m.GetSurname(); val != nil {
+				surname = *val
+			}
+
+			jsonMembers = append(jsonMembers, JSONMember{
+				GivenName:         givenName,
+				Mail:              mail,
+				Surname:           surname,
+				UserPrincipalName: upn,
+			})
+			sqliteUsers = append(sqliteUsers, SQLiteUser{
+				UserPrincipalName: upn,
+				GivenName:         givenName,
+				Mail:              mail,
+				Surname:           surname,
+			})
+			groupMemberLinks = append(groupMemberLinks, upn)
+
+		// Non-user members are ignored for detailed output, only their names are logged for group mapping if needed.
+		// case models.Groupable:
+		// case models.ServicePrincipalable:
 		}
 	}
-	return memberNames
+	return jsonMembers, sqliteUsers, groupMemberLinks
 }
 
-func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, jsonResults chan<- JSONGroup, sqliteResults chan<- SQLiteGroupMember) {
+func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, jsonResults chan<- JSONGroup, sqliteResults chan<- SQLiteGroupMember, userTasks chan<- SQLiteUser) {
 	defer wg.Done()
 	for group := range groupTasks {
 		if group == nil || group.GetId() == nil || group.GetDisplayName() == nil {
@@ -304,7 +347,6 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 		}
 		groupName := *group.GetDisplayName()
 
-		// Optimistic Logging
 		currentCount := e.processedCount.Add(1)
 		if e.countIsReady.Load() {
 			total := e.totalGroups.Load()
@@ -318,18 +360,23 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 			log.Printf("[Processed: %d] Data extraction for group %s", currentCount, groupName)
 		}
 
-		var allMemberNames []string
+		var allJsonMembers []JSONMember
 
-		// Process the first page of members that came with the $expand query
-		if group.GetMembers() != nil {
-			processedNames := e.processMembers(group.GetMembers())
-			allMemberNames = append(allMemberNames, processedNames...)
-			for _, name := range processedNames {
-				sqliteResults <- SQLiteGroupMember{GroupName: groupName, MemberName: name}
+		processAndDispatch := func(members []models.DirectoryObjectable) {
+			jsonMembers, sqliteUsers, groupMemberLinks := e.processMembers(members)
+			allJsonMembers = append(allJsonMembers, jsonMembers...)
+			for _, user := range sqliteUsers {
+				userTasks <- user
+			}
+			for _, upn := range groupMemberLinks {
+				sqliteResults <- SQLiteGroupMember{GroupName: groupName, MemberName: upn}
 			}
 		}
 
-		// Check for subsequent pages of members and process them
+		if group.GetMembers() != nil {
+			processAndDispatch(group.GetMembers())
+		}
+
 		var nextLink *string
 		if val, ok := group.GetAdditionalData()["members@odata.nextLink"]; ok && val != nil {
 			if s, ok := val.(*string); ok {
@@ -338,29 +385,18 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 		}
 
 		if nextLink != nil && *nextLink != "" {
-			// Create a fake collection response to initialize the iterator with the nextLink
 			fakeCollection := models.NewDirectoryObjectCollectionResponse()
 			fakeCollection.SetOdataNextLink(nextLink)
-
-			pageIterator, err := msgraphgocore.NewPageIterator[models.DirectoryObjectable](
-				fakeCollection,
-				e.client.GetAdapter(),
-				models.CreateDirectoryObjectCollectionResponseFromDiscriminatorValue,
-			)
+			pageIterator, err := msgraphgocore.NewPageIterator[models.DirectoryObjectable](fakeCollection, e.client.GetAdapter(), models.CreateDirectoryObjectCollectionResponseFromDiscriminatorValue)
 			if err != nil {
 				log.Printf("Error creating page iterator for group %s members nextLink: %v", groupName, err)
 			} else {
-				// Iterate over the remaining pages
 				err := pageIterator.Iterate(e.ctx, func(member models.DirectoryObjectable) bool {
 					if err := e.limiter.Wait(e.ctx); err != nil {
 						log.Printf("Error waiting for rate limiter while paginating members for group %s: %v", groupName, err)
 						return false
 					}
-					processedNames := e.processMembers([]models.DirectoryObjectable{member})
-					allMemberNames = append(allMemberNames, processedNames...)
-					for _, name := range processedNames {
-						sqliteResults <- SQLiteGroupMember{GroupName: groupName, MemberName: name}
-					}
+					processAndDispatch([]models.DirectoryObjectable{member})
 					return true
 				})
 				if err != nil {
@@ -369,14 +405,14 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 			}
 		}
 
-		jsonResults <- JSONGroup{ADGroupName: groupName, ADGroupMemberName: allMemberNames}
+		jsonResults <- JSONGroup{ADGroupName: groupName, ADGroupMemberName: allJsonMembers}
 	}
 }
 
 func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseable, error) {
 	requestParameters := &groups.GroupsRequestBuilderGetQueryParameters{
 		Select:  []string{"displayName", "id"},
-		Expand:  []string{fmt.Sprintf("members($top=%d)", e.config.PageSize)},
+		Expand:  []string{fmt.Sprintf("members($select=givenName,mail,surname,userPrincipalName;$top=%d)", e.config.PageSize)},
 		Orderby: []string{"displayName asc"},
 		Top:     int32Ptr(e.config.PageSize),
 	}
@@ -450,8 +486,51 @@ func setupDatabase(ctx context.Context, dbName string) (*sql.DB, error) {
 	if _, err := db.ExecContext(ctx, createGroupMemberIndexSQL); err != nil {
 		return nil, fmt.Errorf("failed to create groupMember index: %w", err)
 	}
-	log.Printf("Database '%s' and table 'entraGroups' are set up successfully.", dbName)
+
+	// New table for user details
+	createUsersTableSQL := `CREATE TABLE IF NOT EXISTS entraUsers (UserPrincipalName TEXT PRIMARY KEY, givenName TEXT, mail TEXT, surname TEXT);`
+	if _, err := db.ExecContext(ctx, createUsersTableSQL); err != nil {
+		return nil, fmt.Errorf("failed to create entraUsers table: %w", err)
+	}
+	createUserIndexSQL := `CREATE UNIQUE INDEX IF NOT EXISTS idx_userPrincipalName ON entraUsers (UserPrincipalName);`
+	if _, err := db.ExecContext(ctx, createUserIndexSQL); err != nil {
+		return nil, fmt.Errorf("failed to create userPrincipalName index: %w", err)
+	}
+
+	log.Printf("Database '%s' and tables 'entraGroups', 'entraUsers' are set up successfully.", dbName)
 	return db, nil
+}
+
+func (e *Extractor) processUserInserts(wg *sync.WaitGroup, users <-chan SQLiteUser) {
+	defer wg.Done()
+	tx, err := e.db.BeginTx(e.ctx, nil)
+	if err != nil {
+		log.Printf("Error starting SQLite transaction for users: %v", err)
+		return
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(e.ctx, "INSERT OR IGNORE INTO entraUsers (UserPrincipalName, givenName, mail, surname) VALUES (?, ?, ?, ?)")
+	if err != nil {
+		log.Printf("Error preparing SQLite user statement: %v", err)
+		return
+	}
+	defer stmt.Close()
+
+	insertCount := 0
+	for user := range users {
+		if _, err := stmt.ExecContext(e.ctx, user.UserPrincipalName, user.GivenName, user.Mail, user.Surname); err != nil {
+			log.Printf("Error executing SQLite insert for user '%s': %v", user.UserPrincipalName, err)
+			return
+		}
+		insertCount++
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("Error committing SQLite user transaction: %v", err)
+	} else {
+		log.Printf("Committed %d user records to SQLite.", insertCount)
+	}
 }
 
 func main() {
