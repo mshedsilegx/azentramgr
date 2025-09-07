@@ -1,8 +1,8 @@
-# Azure AD Group Member Extractor (azentra)
+# Azure AD Manager (azentramgr) - Module: Group member extractor
 
 ## 1. Application Overview and Objectives
 
-`azentra` is a command-line tool for extracting group and member information (first and last name, email, userprincipalname) from an Azure Active Directory (Entra ID) tenant. Its primary objective is to provide an efficient and reliable way to export Azure AD group memberships for analysis, auditing, or reporting purposes.
+`azentramgr` is a command-line tool for extracting group and member information (first and last name, email, userprincipalname) from an Azure Active Directory (Entra ID) tenant. Its primary objective is to provide an efficient and reliable way to export Azure AD group memberships for analysis, auditing, or reporting purposes.
 
 The tool connects to the Microsoft Graph API using your local Azure CLI credentials (`az login`). It fetches all groups, with an option to filter them by name using a regular expression, and then retrieves all members for each of those groups.
 
@@ -35,7 +35,7 @@ az login
 ### Basic Usage
 To run the extractor with default settings, which will fetch all groups in the tenant:
 ```sh
-./azentra
+./azentramgr
 ```
 
 ### Filtering for Specific Groups
@@ -44,30 +44,30 @@ You can use the `-group-filter-regex` flag to be more selective about which grou
 **Example 1: Extract groups with a specific prefix**
 ```sh
 # Extracts all groups whose names start with "PROD_"
-./azentra -group-filter-regex "^PROD_"
+./azentramgr -group-filter-regex "^PROD_"
 ```
 
 **Example 2: Extract groups with a specific suffix**
 ```sh
 # Extracts all groups whose names end with "_DEV"
-./azentra -group-filter-regex "_DEV$"
+./azentramgr -group-filter-regex "_DEV$"
 ```
 
 **Example 3: Extract groups containing a certain keyword**
 ```sh
 # Extracts all groups with "UAT" anywhere in the name
-./azentra -group-filter-regex "UAT"
+./azentramgr -group-filter-regex "UAT"
 ```
 
 **Example 4: Extract groups with multiple possible prefixes**
 ```sh
 # Extracts groups starting with either "FINANCE_" or "HR_"
-./azentra -group-filter-regex "^(FINANCE|HR)_"
+./azentramgr -group-filter-regex "^(FINANCE|HR)_"
 ```
 
 ### Specifying Output Filenames
 To provide a custom base name for the output `.json` and `.db` files:
 ```sh
 # This will create "prod_export.json" and "prod_export.db"
-./azentra -output-id prod_export
+./azentramgr -output-id prod_export
 ```

@@ -1,4 +1,4 @@
-module criticalsys.net/azentra
+module criticalsys.net/azentramgr
 
 go 1.25.0
 
