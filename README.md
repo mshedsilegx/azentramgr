@@ -27,7 +27,7 @@ The application's behavior can be customized with the following command-line fla
 
 ### Prerequisites
 
-Microsoft Azure Cli must be installed and available. You must be authenticated with Azure. Run the following command and complete the login process before using the extraction tool:
+Microsoft Azure Cli must be installed and available in path. You must be already be authenticated with Azure (if not, the tool will trigger a login attempt). Run the following command and complete the login process before using the extraction tool:
 ```sh
 az login
 ```
