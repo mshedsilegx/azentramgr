@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"os"
 	"sync"
 	"testing"
@@ -100,4 +101,124 @@ func TestAggregatorFunctions(t *testing.T) {
 	assert.Equal(t, testMember.GivenName, dbUser.GivenName)
 	assert.Equal(t, testMember.Mail, dbUser.Mail)
 	assert.Equal(t, testMember.Surname, dbUser.Surname)
+}
+
+func TestLoadConfig(t *testing.T) {
+	// Helper function to reset flags after each test case
+	resetFlags := func() {
+		flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	}
+
+	// --- Test Case 1: Default auth method ---
+	t.Run("defaults to azidentity", func(t *testing.T) {
+		resetFlags()
+		os.Args = []string{"cmd"} // No flags
+		config, err := LoadConfig()
+		require.NoError(t, err)
+		assert.Equal(t, "azidentity", config.AuthMethod)
+	})
+
+	// --- Test Case 2: clientid auth with environment variables ---
+	t.Run("clientid auth with env vars", func(t *testing.T) {
+		resetFlags()
+		os.Args = []string{"cmd", "-auth", "clientid"}
+		t.Setenv("TENANT_ID", "env_tenant_id")
+		t.Setenv("CLIENT_ID", "env_client_id")
+		t.Setenv("CLIENT_SECRET", "env_client_secret")
+
+		config, err := LoadConfig()
+		require.NoError(t, err)
+		assert.Equal(t, "clientid", config.AuthMethod)
+		assert.Equal(t, "env_tenant_id", config.TenantID)
+		assert.Equal(t, "env_client_id", config.ClientID)
+		assert.Equal(t, "env_client_secret", config.ClientSecret)
+	})
+
+	// --- Test Case 3: clientid auth with config file ---
+	t.Run("clientid auth with config file", func(t *testing.T) {
+		resetFlags()
+		// Create a temporary config file
+		configFile, err := os.CreateTemp("", "config-*.json")
+		require.NoError(t, err)
+		defer os.Remove(configFile.Name())
+
+		configData := map[string]string{
+			"auth":         "clientid",
+			"tenantId":     "file_tenant_id",
+			"clientId":     "file_client_id",
+			"clientSecret": "file_client_secret",
+		}
+		encoder := json.NewEncoder(configFile)
+		err = encoder.Encode(configData)
+		require.NoError(t, err)
+		configFile.Close()
+
+		os.Args = []string{"cmd", "-config", configFile.Name()}
+		config, err := LoadConfig()
+		require.NoError(t, err)
+		assert.Equal(t, "clientid", config.AuthMethod)
+		assert.Equal(t, "file_tenant_id", config.TenantID)
+		assert.Equal(t, "file_client_id", config.ClientID)
+		assert.Equal(t, "file_client_secret", config.ClientSecret)
+	})
+
+	// --- Test Case 4: clientid auth missing credentials ---
+	t.Run("clientid auth missing credentials", func(t *testing.T) {
+		resetFlags()
+		os.Args = []string{"cmd", "-auth", "clientid"}
+		// Ensure env vars are not set
+		t.Setenv("TENANT_ID", "")
+		t.Setenv("CLIENT_ID", "")
+		t.Setenv("CLIENT_SECRET", "")
+
+		_, err := LoadConfig()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "TENANT_ID must be set")
+	})
+
+	// --- Test Case 5: Invalid auth method ---
+	t.Run("invalid auth method", func(t *testing.T) {
+		resetFlags()
+		os.Args = []string{"cmd", "-auth", "invalidauth"}
+		_, err := LoadConfig()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid auth method")
+	})
+
+	// --- Test Case 6: Flag precedence over config file and env vars ---
+	t.Run("flags override config file and env vars", func(t *testing.T) {
+		resetFlags()
+		// Set env vars
+		t.Setenv("TENANT_ID", "env_tenant")
+		t.Setenv("CLIENT_ID", "env_client")
+
+		// Create a temporary config file
+		configFile, err := os.CreateTemp("", "config-*.json")
+		require.NoError(t, err)
+		defer os.Remove(configFile.Name())
+		configData := map[string]interface{}{
+			"auth":       "clientid",
+			"tenantId":   "file_tenant",
+			"clientId":   "file_client",
+			"pageSize":   100,
+			"outputId":   "file_id",
+		}
+		encoder := json.NewEncoder(configFile)
+		err = encoder.Encode(configData)
+		require.NoError(t, err)
+		configFile.Close()
+
+		os.Args = []string{
+			"cmd",
+			"-config", configFile.Name(),
+			"-auth", "azidentity", // This should override the file's "clientid"
+			"-pageSize", "200", // This should override the file's 100
+		}
+		config, err := LoadConfig()
+		require.NoError(t, err)
+		assert.Equal(t, "azidentity", config.AuthMethod)
+		assert.Equal(t, 200, config.PageSize)
+		assert.Equal(t, "file_id", config.OutputID) // This should be from the file
+		assert.Equal(t, "env_tenant", config.TenantID) // This should be from the env var
+	})
 }

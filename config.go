@@ -10,6 +10,10 @@ import (
 
 // Config holds the configuration options for the extractor.
 type Config struct {
+	AuthMethod     string `json:"auth,omitempty"`
+	TenantID       string `json:"tenantId,omitempty"`
+	ClientID       string `json:"clientId,omitempty"`
+	ClientSecret   string `json:"clientSecret,omitempty"`
 	PageSize       int    `json:"pageSize,omitempty"`
 	ParallelJobs   int    `json:"parallelJobs,omitempty"`
 	OutputID       string `json:"outputId,omitempty"`
@@ -23,6 +27,7 @@ type Config struct {
 // flag and exits if it is present.
 func LoadConfig() (Config, error) {
 	// --- Flag Definition ---
+	auth := flag.String("auth", "azidentity", "Authentication method: 'azidentity' or 'clientid'.")
 	configFilePath := flag.String("config", "", "Path to a JSON configuration file. Command-line flags override file values.")
 	versionFlag := flag.Bool("version", false, "Print the version and exit.")
 	pageSize := flag.Int("pageSize", 500, "The number of items to retrieve per page for API queries. Max is 999.")
@@ -48,6 +53,7 @@ func LoadConfig() (Config, error) {
 	// --- Configuration Loading & Merging ---
 	// Start with default values from the flags themselves.
 	config := Config{
+		AuthMethod:   *auth,
 		PageSize:     *pageSize,
 		ParallelJobs: *parallelJobs,
 		OutputID:     *outputID,
@@ -61,19 +67,31 @@ func LoadConfig() (Config, error) {
 		if err != nil {
 			return Config{}, fmt.Errorf("error reading config file: %w", err)
 		}
-		// We unmarshal into the config struct, which already has default values.
-		// Any field present in the JSON will overwrite the default.
 		if err := json.Unmarshal(file, &config); err != nil {
 			return Config{}, fmt.Errorf("error parsing config file: %w", err)
 		}
 	}
 
-	// Re-apply any flags that were set on the command line to override the config file.
+	// Load from environment variables. These overwrite file values but not flags.
+	if val, ok := os.LookupEnv("TENANT_ID"); ok {
+		config.TenantID = val
+	}
+	if val, ok := os.LookupEnv("CLIENT_ID"); ok {
+		config.ClientID = val
+	}
+	if val, ok := os.LookupEnv("CLIENT_SECRET"); ok {
+		config.ClientSecret = val
+	}
+
+	// Re-apply any flags that were set on the command line to override the config file/env vars.
 	isSet := make(map[string]bool)
 	flag.Visit(func(f *flag.Flag) {
 		isSet[f.Name] = true
 	})
 
+	if isSet["auth"] {
+		config.AuthMethod = *auth
+	}
 	if isSet["pageSize"] {
 		config.PageSize = *pageSize
 	}
@@ -91,6 +109,21 @@ func LoadConfig() (Config, error) {
 	}
 
 	// --- Validation ---
+	if config.AuthMethod != "azidentity" && config.AuthMethod != "clientid" {
+		return Config{}, fmt.Errorf("invalid auth method: %s. Must be 'azidentity' or 'clientid'", config.AuthMethod)
+	}
+
+	if config.AuthMethod == "clientid" {
+		if config.TenantID == "" {
+			return Config{}, fmt.Errorf("TENANT_ID must be set via config file or environment variable for clientid auth")
+		}
+		if config.ClientID == "" {
+			return Config{}, fmt.Errorf("CLIENT_ID must be set via config file or environment variable for clientid auth")
+		}
+		if config.ClientSecret == "" {
+			return Config{}, fmt.Errorf("CLIENT_SECRET must be set via config file or environment variable for clientid auth")
+		}
+	}
 	if config.PageSize > 999 || config.PageSize < 1 {
 		return Config{}, fmt.Errorf("pageSize must be between 1 and 999")
 	}
