@@ -11,7 +11,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"runtime"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,11 +62,12 @@ type SQLiteUser struct {
 
 // Config holds the configuration options for the extractor.
 type Config struct {
-	PageSize       int
-	OutputID       string
-	GroupName      string
-	GroupMatch     string
-	JsonOutputFile string // The full path to the JSON output file
+	PageSize       int    `json:"pageSize,omitempty"`
+	ParallelJobs   int    `json:"parallelJobs,omitempty"`
+	OutputID       string `json:"outputId,omitempty"`
+	GroupName      string `json:"groupName,omitempty"`
+	GroupMatch     string `json:"groupMatch,omitempty"`
+	JsonOutputFile string `json:"jsonOutputFile,omitempty"` // The full path to the JSON output file
 }
 
 // Extractor holds the application's state and logic.
@@ -121,7 +122,7 @@ func (e *Extractor) Run() error {
 	var workersWg, aggregatorsWg sync.WaitGroup
 
 	// 3. Start workers and result aggregators
-	numWorkers := runtime.NumCPU() * 16
+	numWorkers := e.config.ParallelJobs
 	for i := 0; i < numWorkers; i++ {
 		workersWg.Add(1)
 		go e.worker(&workersWg, groupTasks, jsonResults, sqliteResults, userTasks)
@@ -637,18 +638,73 @@ func (e *Extractor) processUserInserts(wg *sync.WaitGroup, users <-chan SQLiteUs
 }
 
 func main() {
-	// Define and parse flags
-	config := Config{}
+	// --- Flag Definition ---
+	configFilePath := flag.String("config", "", "Path to a JSON configuration file. Command-line flags override file values.")
 	versionFlag := flag.Bool("version", false, "Print the version and exit.")
-	flag.IntVar(&config.PageSize, "pageSize", 500, "The number of items to retrieve per page for API queries. Max is 999.")
-	flag.StringVar(&config.OutputID, "output-id", "", "Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID is generated.")
-	flag.StringVar(&config.GroupName, "group-name", "", "Exact name of a single group, or a comma-separated list of group names, to process.")
-	flag.StringVar(&config.GroupMatch, "group-match", "", "Partial match for a group name. Use '*' as a wildcard. E.g., 'Proj*', '*Test*', 'Start*End'. Defaults to 'contains' if no wildcards. Quote argument to avoid shell globbing.")
+	pageSize := flag.Int("pageSize", 500, "The number of items to retrieve per page for API queries. Max is 999.")
+	parallelJobs := flag.Int("parallelJobs", 16, "Number of concurrent jobs for processing groups.")
+	outputID := flag.String("output-id", "", "Custom ID for output filenames (e.g., 'my-export').")
+	groupName := flag.String("group-name", "", "Exact name of a single group (e.g., 'MyGroup') or a comma-separated list (e.g., 'Group1,Group2') to process.")
+	groupMatch := flag.String("group-match", "", "Partial match for a group name. Use '*' as a wildcard. E.g., 'Proj*', '*Test*', 'Start*End'. Defaults to 'contains' if no wildcards. Quote argument to avoid shell globbing.")
+
+	// Custom usage message
+	flag.Usage = func() {
+		// Use the version variable, which should be populated by the build process.
+		fmt.Fprintf(os.Stderr, "Azure Entra Extractor v%s\n", version)
+		fmt.Fprintf(os.Stderr, "Usage of %s:\n", filepath.Base(os.Args[0]))
+		flag.PrintDefaults()
+	}
+
 	flag.Parse()
 
 	if *versionFlag {
 		fmt.Printf("AZ Entra Extractor v%s\n", version)
 		os.Exit(0)
+	}
+
+	// --- Configuration Loading & Merging ---
+	// Start with default values from the flags themselves.
+	config := Config{
+		PageSize:     *pageSize,
+		ParallelJobs: *parallelJobs,
+		OutputID:     *outputID,
+		GroupName:    *groupName,
+		GroupMatch:   *groupMatch,
+	}
+
+	// Load from config file if provided. This overwrites the defaults.
+	if *configFilePath != "" {
+		file, err := os.ReadFile(*configFilePath)
+		if err != nil {
+			log.Fatalf("Error reading config file: %v", err)
+		}
+		// We unmarshal into the config struct, which already has default values.
+		// Any field present in the JSON will overwrite the default.
+		if err := json.Unmarshal(file, &config); err != nil {
+			log.Fatalf("Error parsing config file: %v", err)
+		}
+	}
+
+	// Re-apply any flags that were set on the command line to override the config file.
+	isSet := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) {
+		isSet[f.Name] = true
+	})
+
+	if isSet["pageSize"] {
+		config.PageSize = *pageSize
+	}
+	if isSet["parallelJobs"] {
+		config.ParallelJobs = *parallelJobs
+	}
+	if isSet["output-id"] {
+		config.OutputID = *outputID
+	}
+	if isSet["group-name"] {
+		config.GroupName = *groupName
+	}
+	if isSet["group-match"] {
+		config.GroupMatch = *groupMatch
 	}
 
 	// Validate flags
