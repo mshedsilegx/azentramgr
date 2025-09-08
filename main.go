@@ -10,7 +10,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -92,7 +91,7 @@ func (e *Extractor) Run() error {
 	aggregatorsWg.Add(1)
 	go e.processUserInserts(&aggregatorsWg, userTasks)
 	aggregatorsWg.Add(1)
-	go e.streamJsonToFile(&aggregatorsWg, jsonResults)
+	go streamJsonToFile(&aggregatorsWg, jsonResults, e.config.JsonOutputFile)
 
 	// 4. Goroutine to close result channels once all workers are done
 	go func() {
@@ -213,9 +212,9 @@ func (e *Extractor) getGroupIterator() (*msgraphgocore.PageIterator[*models.Grou
 	return msgraphgocore.NewPageIterator[*models.Group](result, e.client.GetAdapter(), models.CreateGroupCollectionResponseFromDiscriminatorValue)
 }
 
-func (e *Extractor) streamJsonToFile(wg *sync.WaitGroup, results <-chan JSONGroup) {
+func streamJsonToFile(wg *sync.WaitGroup, results <-chan JSONGroup, outputFile string) {
 	defer wg.Done()
-	file, err := os.Create(e.config.JsonOutputFile)
+	file, err := os.Create(outputFile)
 	if err != nil {
 		log.Printf("Error creating JSON output file: %v", err)
 		return
@@ -250,7 +249,7 @@ func (e *Extractor) streamJsonToFile(wg *sync.WaitGroup, results <-chan JSONGrou
 	if _, err := writer.WriteString("\n]"); err != nil {
 		log.Printf("Error writing closing bracket to JSON file: %v", err)
 	}
-	log.Printf("Successfully wrote JSON output to %s", e.config.JsonOutputFile)
+	log.Printf("Successfully wrote JSON output to %s", outputFile)
 }
 
 func (e *Extractor) processSQLiteInserts(wg *sync.WaitGroup, results <-chan SQLiteGroupMember) {
@@ -530,134 +529,6 @@ func (e *Extractor) processUserInserts(wg *sync.WaitGroup, users <-chan SQLiteUs
 	} else {
 		log.Printf("Committed %d user records to SQLite.", insertCount)
 	}
-}
-
-func runFromCache(config Config) error {
-	// --- 1. Print informational messages ---
-	fileInfo, err := os.Stat(config.UseCache)
-	if err != nil {
-		// This should have been caught by validation in LoadConfig, but check again.
-		return fmt.Errorf("could not stat cache file: %w", err)
-	}
-	log.Printf("Remark: Querying from cache file %s (last modified: %s). Data may be outdated.", config.UseCache, fileInfo.ModTime().Format(time.RFC1123))
-	log.Println("Remark: A new SQLite file will not be created when running from cache.")
-	if config.AuthMethod != "azidentity" || config.PageSize != 500 || config.ParallelJobs != 16 {
-		log.Println("Remark: Flags like --auth, --pageSize, and --parallelJobs are ignored when using --use-cache.")
-	}
-
-	// --- 2. Connect to the cache DB ---
-	db, err := sql.Open("sqlite", config.UseCache)
-	if err != nil {
-		return fmt.Errorf("failed to open cache database: %w", err)
-	}
-	defer db.Close()
-
-	// --- 3. Build the SQL query ---
-	query := `
-		SELECT g.groupName, u.userPrincipalName, u.givenName, u.mail, u.surname
-		FROM entraGroups g
-		JOIN entraUsers u ON g.groupMember = u.userPrincipalName
-	`
-	var args []interface{}
-	var whereClauses []string
-
-	if config.GroupName != "" {
-		names := strings.Split(config.GroupName, ",")
-		placeholders := strings.Repeat("?,", len(names)-1) + "?"
-		whereClauses = append(whereClauses, "g.groupName IN ("+placeholders+")")
-		for _, name := range names {
-			args = append(args, strings.TrimSpace(name))
-		}
-	} else if config.GroupMatch != "" {
-		matchStr := strings.TrimSpace(config.GroupMatch)
-		// Translate Graph wildcard to SQL LIKE wildcard
-		sqlPattern := strings.ReplaceAll(matchStr, "*", "%")
-		if !strings.HasPrefix(sqlPattern, "%") && !strings.HasSuffix(sqlPattern, "%") {
-			// If no wildcards were in the original string, default to a 'contains' search
-			sqlPattern = "%" + sqlPattern + "%"
-		}
-		whereClauses = append(whereClauses, "g.groupName LIKE ?")
-		args = append(args, sqlPattern)
-	}
-
-	if len(whereClauses) > 0 {
-		query += " WHERE " + strings.Join(whereClauses, " AND ")
-	}
-	query += " ORDER BY g.groupName, u.userPrincipalName;"
-
-	log.Printf("Executing SQL query against cache...")
-
-	// --- 4. Execute the query ---
-	rows, err := db.Query(query, args...)
-	if err != nil {
-		return fmt.Errorf("failed to execute query on cache: %w", err)
-	}
-	defer rows.Close()
-
-	// --- 5. Process results ---
-	// Aggregate results into a map for easy grouping
-	groupMembers := make(map[string][]JSONMember)
-	for rows.Next() {
-		var groupName, upn, givenName, mail, surname sql.NullString
-		if err := rows.Scan(&groupName, &upn, &givenName, &mail, &surname); err != nil {
-			return fmt.Errorf("failed to scan row from cache: %w", err)
-		}
-		member := JSONMember{
-			UserPrincipalName: upn.String,
-			GivenName:         givenName.String,
-			Mail:              mail.String,
-			Surname:           surname.String,
-		}
-		groupMembers[groupName.String] = append(groupMembers[groupName.String], member)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("error during row iteration: %w", err)
-	}
-
-	log.Printf("Found %d matching groups in cache.", len(groupMembers))
-
-	// Convert map to slice of JSONGroup for ordered output
-	var results []JSONGroup
-	for groupName, members := range groupMembers {
-		results = append(results, JSONGroup{
-			ADGroupName:       groupName,
-			ADGroupMemberName: members,
-		})
-	}
-	// Sort results by group name for consistent output
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].ADGroupName < results[j].ADGroupName
-	})
-
-	// --- 6. Generate JSON output ---
-	// Determine base filename
-	var baseName string
-	if config.OutputID != "" {
-		baseName = config.OutputID
-	} else {
-		// Create a dynamic name, but without tenant ID as it's not available in cache mode
-		baseName = fmt.Sprintf("cached-query_%s", time.Now().Format("20060102-150405"))
-	}
-	jsonOutputFile := baseName + ".json"
-
-	file, err := os.Create(jsonOutputFile)
-	if err != nil {
-		return fmt.Errorf("error creating JSON output file: %w", err)
-	}
-	defer file.Close()
-
-	writer := bufio.NewWriter(file)
-	encoder := json.NewEncoder(writer)
-	encoder.SetIndent("", "  ")
-
-	if err := encoder.Encode(results); err != nil {
-		return fmt.Errorf("error encoding JSON to file: %w", err)
-	}
-	writer.Flush()
-
-	log.Printf("Successfully wrote JSON output to %s", jsonOutputFile)
-
-	return nil
 }
 
 func main() {

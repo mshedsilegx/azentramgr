@@ -22,9 +22,14 @@ func TestAggregatorFunctions(t *testing.T) {
 		UserPrincipalName: "testy.mctesterson_example.com#EXT#@yourtenant.onmicrosoft.com",
 	}
 
-	// 2. Setup in-memory database and all tables
-	// Call setupDatabase and use the db connection it returns
-	db, err := setupDatabase(context.Background(), ":memory:")
+	// 2. Setup a temporary file-based database
+	dbFile, err := os.CreateTemp("", "test-aggregator-*.db")
+	require.NoError(t, err)
+	dbPath := dbFile.Name()
+	dbFile.Close()
+	defer os.Remove(dbPath)
+
+	db, err := setupDatabase(context.Background(), dbPath)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -49,7 +54,7 @@ func TestAggregatorFunctions(t *testing.T) {
 	var aggregatorsWg sync.WaitGroup
 
 	aggregatorsWg.Add(3)
-	go extractor.streamJsonToFile(&aggregatorsWg, jsonResults)
+	go streamJsonToFile(&aggregatorsWg, jsonResults, extractor.config.JsonOutputFile)
 	go extractor.processSQLiteInserts(&aggregatorsWg, sqliteGroupResults)
 	go extractor.processUserInserts(&aggregatorsWg, sqliteUserResults)
 
@@ -220,6 +225,42 @@ func TestLoadConfig(t *testing.T) {
 		assert.Equal(t, 200, config.PageSize)
 		assert.Equal(t, "file_id", config.OutputID)    // This should be from the file
 		assert.Equal(t, "env_tenant", config.TenantID) // This should be from the env var
+	})
+
+	// --- Test Case 7: Incompatible flags with --use-cache ---
+	t.Run("incompatible flags with use-cache", func(t *testing.T) {
+		// Create a dummy file to pass the existence check
+		dummyFile, err := os.CreateTemp("", "dummy-cache-*.db")
+		require.NoError(t, err)
+		defer os.Remove(dummyFile.Name())
+		dummyFile.Close()
+
+		testCases := []struct {
+			flag    string
+			errMsg  string
+		}{
+			{"--auth", "--auth is incompatible with --use-cache"},
+			{"--pageSize", "--pageSize is incompatible with --use-cache"},
+			{"--parallelJobs", "--parallelJobs is incompatible with --use-cache"},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.flag, func(t *testing.T) {
+				resetFlags()
+				args := []string{"cmd", "--use-cache", dummyFile.Name()}
+				// Provide a valid value for each flag type
+				switch tc.flag {
+				case "--pageSize", "--parallelJobs":
+					args = append(args, tc.flag, "1")
+				default:
+					args = append(args, tc.flag, "some-value")
+				}
+				os.Args = args
+				_, err := LoadConfig()
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.errMsg)
+			})
+		}
 	})
 }
 

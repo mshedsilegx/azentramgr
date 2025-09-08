@@ -146,6 +146,8 @@ To provide a custom base name for the output `.json` and `.db` files:
 
 For more complex or repeated executions, you can use a JSON configuration file to specify all options instead of passing them as command-line flags. Use the `--config` flag to specify the path to your configuration file.
 
+> **Security Note:** If your `config.json` file contains a `clientSecret`, ensure you have set appropriate file permissions to restrict access to it. For automated environments, using environment variables for secrets is generally recommended over storing them in a file.
+
 ```sh
 ./azentramgr --config /path/to/my_config.json
 ```

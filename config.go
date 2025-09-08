@@ -119,6 +119,16 @@ func LoadConfig() (Config, error) {
 		if _, err := os.Stat(config.UseCache); os.IsNotExist(err) {
 			return Config{}, fmt.Errorf("cache file does not exist: %s", config.UseCache)
 		}
+		// Check for incompatible flags when using cache
+		if isSet["auth"] {
+			return Config{}, fmt.Errorf("--auth is incompatible with --use-cache")
+		}
+		if isSet["pageSize"] {
+			return Config{}, fmt.Errorf("--pageSize is incompatible with --use-cache")
+		}
+		if isSet["parallelJobs"] {
+			return Config{}, fmt.Errorf("--parallelJobs is incompatible with --use-cache")
+		}
 	}
 
 	if config.AuthMethod != "azidentity" && config.AuthMethod != "clientid" {
