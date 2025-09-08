@@ -262,7 +262,11 @@ func (e *Extractor) processSQLiteInserts(wg *sync.WaitGroup, results <-chan SQLi
 		log.Printf("Error starting SQLite transaction: %v", err)
 		return
 	}
-	defer tx.Rollback()
+	defer func() {
+		if err := tx.Rollback(); err != nil {
+			log.Printf("ERROR: transaction rollback failed: %v", err)
+		}
+	}()
 
 	stmt, err := tx.PrepareContext(e.ctx, "INSERT INTO entraGroups (groupName, groupMember) VALUES (?, ?)")
 	if err != nil {
@@ -330,9 +334,9 @@ func (e *Extractor) processMembers(members []models.DirectoryObjectable) ([]JSON
 			})
 			groupMemberLinks = append(groupMemberLinks, upn)
 
-		// Non-user members are ignored for detailed output, only their names are logged for group mapping if needed.
-		// case models.Groupable:
-		// case models.ServicePrincipalable:
+			// Non-user members are ignored for detailed output, only their names are logged for group mapping if needed.
+			// case models.Groupable:
+			// case models.ServicePrincipalable:
 		}
 	}
 	return jsonMembers, sqliteUsers, groupMemberLinks
@@ -508,7 +512,11 @@ func (e *Extractor) processUserInserts(wg *sync.WaitGroup, users <-chan SQLiteUs
 		log.Printf("Error starting SQLite transaction for users: %v", err)
 		return
 	}
-	defer tx.Rollback()
+	defer func() {
+		if err := tx.Rollback(); err != nil {
+			log.Printf("ERROR: transaction rollback failed: %v", err)
+		}
+	}()
 
 	stmt, err := tx.PrepareContext(e.ctx, "INSERT OR IGNORE INTO entraUsers (UserPrincipalName, givenName, mail, surname) VALUES (?, ?, ?, ?)")
 	if err != nil {

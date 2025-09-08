@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"io/ioutil"
 	"os"
 	"sync"
 	"testing"
@@ -29,7 +28,7 @@ func TestAggregatorFunctions(t *testing.T) {
 	defer db.Close()
 
 	// 3. Setup temp file for JSON output
-	tmpFile, err := ioutil.TempFile("", "test-output-*.json")
+	tmpFile, err := os.CreateTemp("", "test-output-*.json")
 	require.NoError(t, err)
 	defer os.Remove(tmpFile.Name())
 	tmpFile.Close()
@@ -76,7 +75,7 @@ func TestAggregatorFunctions(t *testing.T) {
 
 	// 6. Verify the output
 	// Verify JSON file content
-	jsonContent, err := ioutil.ReadFile(tmpFile.Name())
+	jsonContent, err := os.ReadFile(tmpFile.Name())
 	require.NoError(t, err)
 	var outputGroups []JSONGroup
 	err = json.Unmarshal(jsonContent, &outputGroups)
