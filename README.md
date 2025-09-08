@@ -113,15 +113,27 @@ For more complex or repeated executions, you can use a JSON configuration file t
 ./azentramgr --config /path/to/my_config.json
 ```
 
-### Example `config.json`
-Here is an example of a configuration file with all available options:
+### Configuration Examples
+
+Below are two examples demonstrating how to configure the tool for different filtering strategies. Remember that `groupName` and `groupMatch` are mutually exclusive.
+
+**Example 1: Using `groupName` for exact matches**
 ```json
 {
-  "pageSize": 750,
-  "parallelJobs": 32,
-  "outputId": "quarterly-report",
-  "groupName": "Finance Users,Marketing Leads",
-  "groupMatch": ""
+  "pageSize": 500,
+  "parallelJobs": 16,
+  "outputId": "finance-export",
+  "groupName": "Finance Users,Marketing Leads"
+}
+```
+
+**Example 2: Using `groupMatch` for a partial match**
+```json
+{
+  "pageSize": 500,
+  "parallelJobs": 16,
+  "outputId": "test-groups-export",
+  "groupMatch": "*-Test-*"
 }
 ```
 
