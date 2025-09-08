@@ -1,9 +1,19 @@
 # Ignore Go build output
 azentramgr
 *.exe
+*.bin
+*.dll
+*.so
+*.lib
 
 # Ignore SQLite database files
 *.db
 
-# Ignore backup files
-*.0*
+# Ignore backup files (sequences)
+*.bk??
+
+# Ignore build files
+COMMON.md
+GEMINI.md
+CLAUDE.md
+JULES.md
