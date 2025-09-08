@@ -18,13 +18,15 @@ The application's behavior can be customized with the following command-line fla
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `-version` | bool | `false` | Print the application version and exit. |
-| `-pageSize` | int | `500` | The number of items to retrieve per page for API queries (for both groups and members). Max is 999. |
-| `-output-id` | string | `""` (dynamic) | Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID (`<tenant_id>_<timestamp>`) is generated. |
-| `-group-name` | string | `""` | Process only groups with exact names. Provide a single name or a comma-separated list. |
-| `-group-match` | string | `""` | Process groups using a partial match. Use `*` as a wildcard. E.g., 'Proj*', '*Test*', 'Start*End'. Defaults to 'contains' if no wildcards. Quote argument to avoid shell globbing. |
+| `--version` | bool | `false` | Print the application version and exit. |
+| `--config` | string | `""` | Path to a JSON configuration file. Command-line flags override file values. See the "Configuration File" section for details. |
+| `--pageSize` | int | `500` | The number of items to retrieve per page for API queries. Max is 999. |
+| `--parallelJobs` | int | `16` | Number of concurrent jobs for processing groups. |
+| `--output-id` | string | `""` (dynamic) | Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID (`<tenant_id>_<timestamp>`) is generated. |
+| `--group-name` | string | `""` | Process only groups with exact names. Provide a single name or a comma-separated list (e.g., `"UAT Users,Admins"`). |
+| `--group-match` | string | `""` | Process groups using a partial match. Use `*` as a wildcard. E.g., `'Proj*'`, `'*Test*'`. Quote argument to avoid shell globbing. |
 
-> **Note:** `-group-name` and `-group-match` are mutually exclusive and cannot be used at the same time.
+> **Note:** `--group-name` and `--group-match` are mutually exclusive and cannot be used at the same time.
 
 ## 3. Examples on How to Use
 
@@ -100,5 +102,67 @@ This flag uses wildcards (`*`) to perform `contains`, `startsWith`, or `endsWith
 To provide a custom base name for the output `.json` and `.db` files:
 ```sh
 # This will create "prod_export.json" and "prod_export.db"
-./azentramgr -output-id prod_export --group-name "My Production Group"
+./azentramgr --output-id prod_export --group-name "My Production Group"
 ```
+
+## 4. Configuration File
+
+For more complex or repeated executions, you can use a JSON configuration file to specify all options instead of passing them as command-line flags. Use the `--config` flag to specify the path to your configuration file.
+
+```sh
+./azentramgr --config /path/to/my_config.json
+```
+
+### Configuration Examples
+
+Below are two examples demonstrating how to configure the tool for different filtering strategies. Remember that `groupName` and `groupMatch` are mutually exclusive.
+
+**Example 1: Using `groupName` for exact matches**
+```json
+{
+  "pageSize": 500,
+  "parallelJobs": 16,
+  "outputId": "finance-export",
+  "groupName": "Finance Users,Marketing Leads"
+}
+```
+
+**Example 2: Using `groupMatch` for a partial match**
+```json
+{
+  "pageSize": 500,
+  "parallelJobs": 16,
+  "outputId": "test-groups-export",
+  "groupMatch": "*-Test-*"
+}
+```
+
+### Precedence
+Any flag set directly on the command line will **always override** the corresponding value in the configuration file. For example, if your `config.json` specifies `parallelJobs: 16`, running the following command will execute with 32 jobs:
+```sh
+./azentramgr --config /path/to/my_config.json --parallelJobs 32
+```
+
+## 5. Architecture and Design
+
+The application is designed to be a robust and scalable pipeline for extracting data from Azure AD. The architecture is built around a few key principles: concurrency for performance, streaming for low memory usage, and clear separation of concerns.
+
+The core components of the design are:
+
+1.  **Configuration Loading:** The application first loads its configuration from multiple sources, with a clear order of precedence:
+    1.  Default values set in the code.
+    2.  Values from a JSON file (if specified with `--config`).
+    3.  Values from command-line flags, which always override any other settings.
+
+2.  **The Extractor Struct:** The `Extractor` is the central struct that holds the application's state, including the configuration, API client, database connection, and a rate limiter. The main logic is executed via its `Run()` method.
+
+3.  **Dispatcher-Worker-Aggregator Model:** The main `Run()` method orchestrates a concurrent pipeline:
+    *   **Dispatcher:** A single goroutine is responsible for querying the Graph API to get the list of groups to be processed. It then "dispatches" each group as a task onto a `groupTasks` channel.
+    *   **Worker Pool:** A pool of worker goroutines (number configured by `--parallelJobs`) concurrently consumes groups from the `groupTasks` channel. Each worker fetches the members for its assigned group and places the results (JSON data and SQLite records) onto separate result channels.
+    *   **Aggregators:** Dedicated goroutines listen on the result channels. One aggregator streams JSON objects to the output file, while others handle batching and inserting records into the SQLite database in transactions.
+
+4.  **Scalability Features:**
+    *   **Streaming:** By using channels and processing data as it arrives, the application never holds the entire dataset in memory. This ensures it can handle very large Azure AD tenants without running out of memory.
+    *   **API Efficiency:** It uses server-side filtering (`$filter`) to minimize data transfer and client-side processing. It also uses a `rate.Limiter` to respectfully manage the rate of API calls, preventing throttling errors from the Microsoft Graph API.
+
+This concurrent, streaming model allows `azentramgr` to process data efficiently while maintaining a small memory footprint.

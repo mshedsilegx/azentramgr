@@ -6,12 +6,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,10 +17,8 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	_ "github.com/glebarez/sqlite"
-	"github.com/golang-jwt/jwt/v5"
 	abstractions "github.com/microsoft/kiota-abstractions-go"
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
 	msgraphgocore "github.com/microsoftgraph/msgraph-sdk-go-core"
@@ -31,43 +27,6 @@ import (
 )
 
 var version = "dev"
-
-// JSONMember represents the detailed structure for a user member in the JSON output.
-type JSONMember struct {
-	GivenName         string `json:"givenName,omitempty"`
-	Mail              string `json:"mail,omitempty"`
-	Surname           string `json:"surname,omitempty"`
-	UserPrincipalName string `json:"userPrincipalName"`
-}
-
-// JSONGroup represents the structure for each group in the final JSON output.
-type JSONGroup struct {
-	ADGroupName       string       `json:"ADGroupName"`
-	ADGroupMemberName []JSONMember `json:"ADGroupMemberName,omitempty"` // Use omitempty to hide if nil/empty
-}
-
-// SQLiteGroupMember represents a single row in the SQLite database.
-type SQLiteGroupMember struct {
-	GroupName  string
-	MemberName string // This will now store the UserPrincipalName for users
-}
-
-// SQLiteUser represents a single row in the new entraUsers table.
-type SQLiteUser struct {
-	UserPrincipalName string
-	GivenName         string
-	Mail              string
-	Surname           string
-}
-
-// Config holds the configuration options for the extractor.
-type Config struct {
-	PageSize       int
-	OutputID       string
-	GroupName      string
-	GroupMatch     string
-	JsonOutputFile string // The full path to the JSON output file
-}
 
 // Extractor holds the application's state and logic.
 type Extractor struct {
@@ -121,7 +80,7 @@ func (e *Extractor) Run() error {
 	var workersWg, aggregatorsWg sync.WaitGroup
 
 	// 3. Start workers and result aggregators
-	numWorkers := runtime.NumCPU() * 16
+	numWorkers := e.config.ParallelJobs
 	for i := 0; i < numWorkers; i++ {
 		workersWg.Add(1)
 		go e.worker(&workersWg, groupTasks, jsonResults, sqliteResults, userTasks)
@@ -535,71 +494,6 @@ func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseabl
 
 // --- Helper functions that do not depend on Extractor state ---
 
-func int32Ptr(i int) *int32 {
-	v := int32(i)
-	return &v
-}
-
-func strPtr(s string) *string {
-	return &s
-}
-
-func getTenantID(ctx context.Context, cred *azidentity.AzureCLICredential) (string, error) {
-	token, err := cred.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{"https://graph.microsoft.com/.default"}})
-	if err != nil {
-		return "", fmt.Errorf("failed to get token: %w", err)
-	}
-	parser := new(jwt.Parser)
-	claims := jwt.MapClaims{}
-	// Note: We use ParseUnverified because we don't need to validate the token's signature.
-	// We are only extracting the tenant ID claim ("tid") from a token that we have just
-	// received directly from Azure AD, which we trust as the source.
-	// This is NOT safe for authenticating incoming requests.
-	_, _, err = parser.ParseUnverified(token.Token, claims)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse token: %w", err)
-	}
-	tid, ok := claims["tid"].(string)
-	if !ok {
-		return "", errors.New("could not find 'tid' claim in token")
-	}
-	return tid, nil
-}
-
-func setupDatabase(ctx context.Context, dbName string) (*sql.DB, error) {
-	// Add pragma for performance, accepting the risk of DB corruption on crash.
-	dsn := fmt.Sprintf("file:%s?_pragma=synchronous(OFF)", dbName)
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
-	}
-	createTableSQL := `CREATE TABLE IF NOT EXISTS entraGroups (groupName TEXT, groupMember TEXT);`
-	if _, err := db.ExecContext(ctx, createTableSQL); err != nil {
-		return nil, fmt.Errorf("failed to create table: %w", err)
-	}
-	createGroupNameIndexSQL := `CREATE INDEX IF NOT EXISTS idx_groupName ON entraGroups (groupName);`
-	if _, err := db.ExecContext(ctx, createGroupNameIndexSQL); err != nil {
-		return nil, fmt.Errorf("failed to create groupName index: %w", err)
-	}
-	createGroupMemberIndexSQL := `CREATE INDEX IF NOT EXISTS idx_groupMember ON entraGroups (groupMember);`
-	if _, err := db.ExecContext(ctx, createGroupMemberIndexSQL); err != nil {
-		return nil, fmt.Errorf("failed to create groupMember index: %w", err)
-	}
-
-	// New table for user details
-	createUsersTableSQL := `CREATE TABLE IF NOT EXISTS entraUsers (UserPrincipalName TEXT PRIMARY KEY, givenName TEXT, mail TEXT, surname TEXT);`
-	if _, err := db.ExecContext(ctx, createUsersTableSQL); err != nil {
-		return nil, fmt.Errorf("failed to create entraUsers table: %w", err)
-	}
-	createUserIndexSQL := `CREATE UNIQUE INDEX IF NOT EXISTS idx_userPrincipalName ON entraUsers (UserPrincipalName);`
-	if _, err := db.ExecContext(ctx, createUserIndexSQL); err != nil {
-		return nil, fmt.Errorf("failed to create userPrincipalName index: %w", err)
-	}
-
-	log.Printf("Database '%s' and tables 'entraGroups', 'entraUsers' are set up successfully.", dbName)
-	return db, nil
-}
-
 func (e *Extractor) processUserInserts(wg *sync.WaitGroup, users <-chan SQLiteUser) {
 	defer wg.Done()
 	tx, err := e.db.BeginTx(e.ctx, nil)
@@ -637,26 +531,10 @@ func (e *Extractor) processUserInserts(wg *sync.WaitGroup, users <-chan SQLiteUs
 }
 
 func main() {
-	// Define and parse flags
-	config := Config{}
-	versionFlag := flag.Bool("version", false, "Print the version and exit.")
-	flag.IntVar(&config.PageSize, "pageSize", 500, "The number of items to retrieve per page for API queries. Max is 999.")
-	flag.StringVar(&config.OutputID, "output-id", "", "Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID is generated.")
-	flag.StringVar(&config.GroupName, "group-name", "", "Exact name of a single group, or a comma-separated list of group names, to process.")
-	flag.StringVar(&config.GroupMatch, "group-match", "", "Partial match for a group name. Use '*' as a wildcard. E.g., 'Proj*', '*Test*', 'Start*End'. Defaults to 'contains' if no wildcards. Quote argument to avoid shell globbing.")
-	flag.Parse()
-
-	if *versionFlag {
-		fmt.Printf("AZ Entra Extractor v%s\n", version)
-		os.Exit(0)
-	}
-
-	// Validate flags
-	if config.PageSize > 999 || config.PageSize < 1 {
-		log.Fatalf("Error: pageSize must be between 1 and 999.")
-	}
-	if config.GroupName != "" && config.GroupMatch != "" {
-		log.Fatalf("Error: --group-name and --group-match cannot be used at the same time.")
+	// Load configuration from flags and config file.
+	config, err := LoadConfig()
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	// --- Application Setup ---
