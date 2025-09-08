@@ -11,9 +11,3 @@ azentramgr
 
 # Ignore backup files (sequences)
 *.bk??
-
-# Ignore build files
-COMMON.md
-GEMINI.md
-CLAUDE.md
-JULES.md
