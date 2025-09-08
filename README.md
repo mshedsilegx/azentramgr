@@ -12,7 +12,31 @@ The tool connects to the Microsoft Graph API using your local Azure CLI credenti
 - **Robust API Usage:** Implements rate limiting to respect Graph API throttling limits and correctly handles pagination to ensure all data is retrieved.
 - **Powerful Filtering:** Allows you to target specific groups using exact name matching (including lists) or performant partial matching (`contains`, `startsWith`, `endsWith`).
 
-## 2. Command-Line Arguments
+## 2. Architecture and Design
+
+The application is designed to be a robust and scalable pipeline for extracting data from Azure AD. The architecture is built around a few key principles: concurrency for performance, streaming for low memory usage, and clear separation of concerns.
+
+The core components of the design are:
+
+1.  **Configuration Loading:** The application first loads its configuration from multiple sources, with a clear order of precedence:
+    1.  Default values set in the code.
+    2.  Values from a JSON file (if specified with `--config`).
+    3.  Values from command-line flags, which always override any other settings.
+
+2.  **The Extractor Struct:** The `Extractor` is the central struct that holds the application's state, including the configuration, API client, database connection, and a rate limiter. The main logic is executed via its `Run()` method.
+
+3.  **Dispatcher-Worker-Aggregator Model:** The main `Run()` method orchestrates a concurrent pipeline:
+    *   **Dispatcher:** A single goroutine is responsible for querying the Graph API to get the list of groups to be processed. It then "dispatches" each group as a task onto a `groupTasks` channel.
+    *   **Worker Pool:** A pool of worker goroutines (number configured by `--parallelJobs`) concurrently consumes groups from the `groupTasks` channel. Each worker fetches the members for its assigned group and places the results (JSON data and SQLite records) onto separate result channels.
+    *   **Aggregators:** Dedicated goroutines listen on the result channels. One aggregator streams JSON objects to the output file, while others handle batching and inserting records into the SQLite database in transactions.
+
+4.  **Scalability Features:**
+    *   **Streaming:** By using channels and processing data as it arrives, the application never holds the entire dataset in memory. This ensures it can handle very large Azure AD tenants without running out of memory.
+    *   **API Efficiency:** It uses server-side filtering (`$filter`) to minimize data transfer and client-side processing. It also uses a `rate.Limiter` to respectfully manage the rate of API calls, preventing throttling errors from the Microsoft Graph API.
+
+This concurrent, streaming model allows `azentramgr` to process data efficiently while maintaining a small memory footprint.
+
+## 3. Command-Line Arguments
 
 The application's behavior can be customized with the following command-line flags:
 
@@ -28,7 +52,7 @@ The application's behavior can be customized with the following command-line fla
 
 > **Note:** `--group-name` and `--group-match` are mutually exclusive and cannot be used at the same time.
 
-## 3. Examples on How to Use
+## 4. Examples on How to Use
 
 ### Prerequisites
 
@@ -105,7 +129,7 @@ To provide a custom base name for the output `.json` and `.db` files:
 ./azentramgr --output-id prod_export --group-name "My Production Group"
 ```
 
-## 4. Configuration File
+## 5. Configuration File
 
 For more complex or repeated executions, you can use a JSON configuration file to specify all options instead of passing them as command-line flags. Use the `--config` flag to specify the path to your configuration file.
 
@@ -142,27 +166,3 @@ Any flag set directly on the command line will **always override** the correspon
 ```sh
 ./azentramgr --config /path/to/my_config.json --parallelJobs 32
 ```
-
-## 5. Architecture and Design
-
-The application is designed to be a robust and scalable pipeline for extracting data from Azure AD. The architecture is built around a few key principles: concurrency for performance, streaming for low memory usage, and clear separation of concerns.
-
-The core components of the design are:
-
-1.  **Configuration Loading:** The application first loads its configuration from multiple sources, with a clear order of precedence:
-    1.  Default values set in the code.
-    2.  Values from a JSON file (if specified with `--config`).
-    3.  Values from command-line flags, which always override any other settings.
-
-2.  **The Extractor Struct:** The `Extractor` is the central struct that holds the application's state, including the configuration, API client, database connection, and a rate limiter. The main logic is executed via its `Run()` method.
-
-3.  **Dispatcher-Worker-Aggregator Model:** The main `Run()` method orchestrates a concurrent pipeline:
-    *   **Dispatcher:** A single goroutine is responsible for querying the Graph API to get the list of groups to be processed. It then "dispatches" each group as a task onto a `groupTasks` channel.
-    *   **Worker Pool:** A pool of worker goroutines (number configured by `--parallelJobs`) concurrently consumes groups from the `groupTasks` channel. Each worker fetches the members for its assigned group and places the results (JSON data and SQLite records) onto separate result channels.
-    *   **Aggregators:** Dedicated goroutines listen on the result channels. One aggregator streams JSON objects to the output file, while others handle batching and inserting records into the SQLite database in transactions.
-
-4.  **Scalability Features:**
-    *   **Streaming:** By using channels and processing data as it arrives, the application never holds the entire dataset in memory. This ensures it can handle very large Azure AD tenants without running out of memory.
-    *   **API Efficiency:** It uses server-side filtering (`$filter`) to minimize data transfer and client-side processing. It also uses a `rate.Limiter` to respectfully manage the rate of API calls, preventing throttling errors from the Microsoft Graph API.
-
-This concurrent, streaming model allows `azentramgr` to process data efficiently while maintaining a small memory footprint.
