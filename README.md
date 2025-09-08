@@ -18,13 +18,15 @@ The application's behavior can be customized with the following command-line fla
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `-version` | bool | `false` | Print the application version and exit. |
-| `-pageSize` | int | `500` | The number of items to retrieve per page for API queries (for both groups and members). Max is 999. |
-| `-output-id` | string | `""` (dynamic) | Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID (`<tenant_id>_<timestamp>`) is generated. |
-| `-group-name` | string | `""` | Process only groups with exact names. Provide a single name or a comma-separated list. |
-| `-group-match` | string | `""` | Process groups using a partial match. Use `*` as a wildcard. E.g., 'Proj*', '*Test*', 'Start*End'. Defaults to 'contains' if no wildcards. Quote argument to avoid shell globbing. |
+| `--version` | bool | `false` | Print the application version and exit. |
+| `--config` | string | `""` | Path to a JSON configuration file. Command-line flags override file values. See the "Configuration File" section for details. |
+| `--pageSize` | int | `500` | The number of items to retrieve per page for API queries. Max is 999. |
+| `--parallelJobs` | int | `16` | Number of concurrent jobs for processing groups. |
+| `--output-id` | string | `""` (dynamic) | Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID (`<tenant_id>_<timestamp>`) is generated. |
+| `--group-name` | string | `""` | Process only groups with exact names. Provide a single name or a comma-separated list (e.g., `"UAT Users,Admins"`). |
+| `--group-match` | string | `""` | Process groups using a partial match. Use `*` as a wildcard. E.g., `'Proj*'`, `'*Test*'`. Quote argument to avoid shell globbing. |
 
-> **Note:** `-group-name` and `-group-match` are mutually exclusive and cannot be used at the same time.
+> **Note:** `--group-name` and `--group-match` are mutually exclusive and cannot be used at the same time.
 
 ## 3. Examples on How to Use
 
@@ -100,5 +102,31 @@ This flag uses wildcards (`*`) to perform `contains`, `startsWith`, or `endsWith
 To provide a custom base name for the output `.json` and `.db` files:
 ```sh
 # This will create "prod_export.json" and "prod_export.db"
-./azentramgr -output-id prod_export --group-name "My Production Group"
+./azentramgr --output-id prod_export --group-name "My Production Group"
+```
+
+## 4. Configuration File
+
+For more complex or repeated executions, you can use a JSON configuration file to specify all options instead of passing them as command-line flags. Use the `--config` flag to specify the path to your configuration file.
+
+```sh
+./azentramgr --config /path/to/my_config.json
+```
+
+### Example `config.json`
+Here is an example of a configuration file with all available options:
+```json
+{
+  "pageSize": 750,
+  "parallelJobs": 32,
+  "outputId": "quarterly-report",
+  "groupName": "Finance Users,Marketing Leads",
+  "groupMatch": ""
+}
+```
+
+### Precedence
+Any flag set directly on the command line will **always override** the corresponding value in the configuration file. For example, if your `config.json` specifies `parallelJobs: 16`, running the following command will execute with 32 jobs:
+```sh
+./azentramgr --config /path/to/my_config.json --parallelJobs 32
 ```
