@@ -4,10 +4,11 @@
 
 `azentramgr` is a command-line tool for extracting group and member information (first and last name, email, userprincipalname) from an Azure Active Directory (Entra ID) tenant. Its primary objective is to provide an efficient and reliable way to export Azure AD group memberships for analysis, auditing, or reporting purposes.
 
-The tool connects to the Microsoft Graph API using your local Azure CLI credentials (`az login`). It fetches groups and their members, providing powerful server-side filtering options for efficiency.
+The tool supports two authentication methods for connecting to the Microsoft Graph API: interactive login via your local Azure CLI credentials (`az login`) or non-interactive, automated authentication using a service principal (client ID and secret). It fetches groups and their members, providing powerful server-side filtering options for efficiency.
 
 ### Key Features:
-- **Comprehensive Export:** Creates both a JSON file and a SQLite database for flexible data analysis.
+- **Flexible Authentication:** Supports both interactive `az login` for local use and non-interactive `clientid` with a service principal for automated environments.
+- **Dual Output Format**: Creates a human-readable JSON file for easy inspection and a powerful SQLite database. The database serves as a local, high-performance cache and enables complex queries on the extracted data.
 - **Efficient & Scalable:** Uses concurrency to fetch data quickly and streams results to keep memory usage low, even with large directories.
 - **Robust API Usage:** Implements rate limiting to respect Graph API throttling limits and correctly handles pagination to ensure all data is retrieved.
 - **Powerful Filtering:** Allows you to target specific groups using exact name matching (including lists) or performant partial matching (`contains`, `startsWith`, `endsWith`).
@@ -21,7 +22,8 @@ The core components of the design are:
 1.  **Configuration Loading:** The application first loads its configuration from multiple sources, with a clear order of precedence:
     1.  Default values set in the code.
     2.  Values from a JSON file (if specified with `--config`).
-    3.  Values from command-line flags, which always override any other settings.
+    3.  Values from environment variables (for `clientid` authentication).
+    4.  Values from command-line flags, which always override any other settings.
 
 2.  **The Extractor Struct:** The `Extractor` is the central struct that holds the application's state, including the configuration, API client, database connection, and a rate limiter. The main logic is executed via its `Run()` method.
 
@@ -43,12 +45,14 @@ The application's behavior can be customized with the following command-line fla
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `-version` | bool | `false` | Print the application version and exit. |
+| `-auth` | string | `"azidentity"` | Authentication method. Can be `'azidentity'` (default, uses `'az login'`) or `'clientid'` (for non-interactive auth). |
 | `-config` | string | `""` | Path to a JSON configuration file. Command-line flags override file values. See the "Configuration File" section for details. |
+| `-use-cache` | string | `""` | Path to a SQLite DB file to use as a cache. If specified, all queries are run against this local DB instead of the Graph API. |
 | `-pageSize` | int | `500` | The number of items to retrieve per page for API queries. Max is 999. |
 | `-parallelJobs` | int | `16` | Number of concurrent jobs for processing groups. |
 | `-output-id` | string | `""` (dynamic) | Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID (`<tenant_id>_<timestamp>`) is generated. |
 | `-group-name` | string | `""` | Process only groups with exact names. Provide a single name or a comma-separated list (e.g., `"UAT Users,Admins"`). |
-| `-group-match` | string | `""` | Process groups using a partial match. Use `*` as a wildcard. E.g., `'Proj*'`, `'*Test*'`. Quote argument to avoid shell globbing. |
+| `-group-match` | string | `""` | Process groups using a partial match. The input is translated to a SQL `LIKE` query. `*` is a wildcard. `Proj*` becomes `LIKE 'Proj%'`. `*Test*` becomes `LIKE '%Test%'`. An input with no wildcards like `Test` is treated as `*Test*`. Quote the argument to avoid shell globbing. |
 
 > **Note:** `--group-name` and `--group-match` are mutually exclusive and cannot be used at the same time.
 
@@ -56,13 +60,25 @@ The application's behavior can be customized with the following command-line fla
 
 ### Prerequisites
 
-Microsoft Azure Cli must be installed and available in path. You must be already be authenticated with Azure (if not, the tool will trigger a login attempt). Run the following command and complete the login process before using the extraction tool:
+The tool supports two authentication methods. Choose the one that fits your use case.
+
+#### Method 1: Interactive Login (Default)
+For interactive use, Microsoft Azure CLI must be installed and available in your path. You must be authenticated with Azure before running the tool.
 ```sh
 az login
 ```
+If your token is expired, the tool may prompt you to run `az login` again.
+
+#### Method 2: Non-Interactive (Service Principal)
+For automated execution (e.g., in a CI/CD pipeline), you can use a service principal with a client ID and secret. This method requires the following environment variables to be set:
+- `TENANT_ID`: Your Azure tenant ID.
+- `CLIENT_ID`: The Application (client) ID of your service principal.
+- `CLIENT_SECRET`: The client secret for your service principal.
+
+These values can also be provided in a configuration file (see section 5).
 
 ### Basic Usage
-To run the extractor with default settings, which will fetch all groups in the tenant:
+To run the extractor with default settings (using `az login` auth), which will fetch all groups in the tenant:
 ```sh
 ./azentramgr
 ```
@@ -104,23 +120,20 @@ This flag uses wildcards (`*`) to perform `contains`, `startsWith`, or `endsWith
 ./azentramgr --group-match "PROD-*"
 ```
 
-**Example 3: Find groups that end with a suffix**
+### Using Non-Interactive Authentication
+To run the tool using a service principal, set the `-auth` flag to `clientid` and ensure your environment variables are configured as described in the prerequisites.
 ```sh
-# Finds group names ending with "-Archive"
-./azentramgr --group-match "*-Archive"
+# Ensure TENANT_ID, CLIENT_ID, and CLIENT_SECRET are set in your environment
+./azentramgr --auth clientid --group-name "My Production Group"
 ```
 
-**Example 4: Find groups containing a keyword (explicit)**
+### Querying from a Local Cache
+After running an extraction once, a SQLite database file is created. You can use this file as a local cache for subsequent queries to get instant, offline results without hitting the Graph API.
 ```sh
-# Finds group names containing "Test"
-./azentramgr --group-match "*Test*"
+# Query the previously generated database file for a different set of groups
+./azentramgr --use-cache "prod_export.db" --group-name "Some Other Group"
 ```
-
-**Example 5: Find groups that start and end with specific strings**
-```sh
-# Finds group names that start with "App-" and end with "-Users"
-./azentramgr --group-match "App-*-Users"
-```
+> **Remark:** When using `--use-cache`, the output will be a new JSON file, but a new SQLite file will not be created. Data is read from the cache, so it may be outdated.
 
 ### Specifying Output Filenames
 To provide a custom base name for the output `.json` and `.db` files:
@@ -133,13 +146,15 @@ To provide a custom base name for the output `.json` and `.db` files:
 
 For more complex or repeated executions, you can use a JSON configuration file to specify all options instead of passing them as command-line flags. Use the `--config` flag to specify the path to your configuration file.
 
+> **Security Note:** If your `config.json` file contains a `clientSecret`, ensure you have set appropriate file permissions to restrict access to it. For automated environments, using environment variables for secrets is generally recommended over storing them in a file.
+
 ```sh
 ./azentramgr --config /path/to/my_config.json
 ```
 
 ### Configuration Examples
 
-Below are two examples demonstrating how to configure the tool for different filtering strategies. Remember that `groupName` and `groupMatch` are mutually exclusive.
+Below are examples demonstrating how to configure the tool for different scenarios.
 
 **Example 1: Using `groupName` for exact matches**
 ```json
@@ -161,11 +176,37 @@ Below are two examples demonstrating how to configure the tool for different fil
 }
 ```
 
+**Example 3: Using `clientid` for non-interactive authentication**
+```json
+{
+  "auth": "clientid",
+  "tenantId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "clientId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "clientSecret": "your-client-secret-value-here",
+  "outputId": "automated-export",
+  "groupMatch": "PROD-*"
+}
+```
+
+**Example 4: Using the cache for a query**
+```json
+{
+  "useCache": "path/to/your/prod_export.db",
+  "outputId": "cached-finance-query",
+  "groupName": "Finance-Users"
+}
+```
+
 ### Complete Structure Reference
 The table below lists all possible attributes that can be set in the `config.json` file.
 
 | JSON Key | Type | Description |
 |---|---|---|
+| `useCache` | string | Path to a SQLite DB file to use as a cache. If specified, all other options except filtering and output ID are ignored. |
+| `auth` | string | The authentication method. Can be `'azidentity'` (default) or `'clientid'`. |
+| `tenantId` | string | Your Azure tenant ID. Required when `auth` is `'clientid'`. |
+| `clientId` | string | The Application (client) ID. Required when `auth` is `'clientid'`. |
+| `clientSecret` | string | The client secret for the service principal. Required when `auth` is `'clientid'`. |
 | `pageSize` | integer | The number of items to retrieve per page for API queries. Max is 999. |
 | `parallelJobs` | integer | The number of concurrent jobs for processing groups. Default is 16. |
 | `outputId` | string | Custom base name for the output `.json` and `.db` files (e.g., "my-export"). |
@@ -175,7 +216,13 @@ The table below lists all possible attributes that can be set in the `config.jso
 **Note:** `groupName` and `groupMatch` are mutually exclusive and should not be set at the same time in the configuration.
 
 ### Precedence
-Any flag set directly on the command line will **always override** the corresponding value in the configuration file. For example, if your `config.json` specifies `parallelJobs: 16`, running the following command will execute with 32 jobs:
+The final configuration is determined by the following order of precedence (where items lower in the list override those above them):
+1. Default values in the code.
+2. Values from the `config.json` file.
+3. Values from environment variables (`TENANT_ID`, `CLIENT_ID`, `CLIENT_SECRET`).
+4. Values from command-line flags.
+
+For example, if your `config.json` specifies `parallelJobs: 16`, running the following command will execute with 32 jobs:
 ```sh
 ./azentramgr --config /path/to/my_config.json --parallelJobs 32
 ```

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -33,7 +33,7 @@ func strPtr(s string) *string {
 	return &s
 }
 
-func getTenantID(ctx context.Context, cred *azidentity.AzureCLICredential) (string, error) {
+func getTenantID(ctx context.Context, cred azcore.TokenCredential) (string, error) {
 	token, err := cred.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{"https://graph.microsoft.com/.default"}})
 	if err != nil {
 		return "", fmt.Errorf("failed to get token: %w", err)

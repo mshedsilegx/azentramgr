@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	_ "github.com/glebarez/sqlite"
 	abstractions "github.com/microsoft/kiota-abstractions-go"
@@ -90,7 +91,7 @@ func (e *Extractor) Run() error {
 	aggregatorsWg.Add(1)
 	go e.processUserInserts(&aggregatorsWg, userTasks)
 	aggregatorsWg.Add(1)
-	go e.streamJsonToFile(&aggregatorsWg, jsonResults)
+	go streamJsonToFile(&aggregatorsWg, jsonResults, e.config.JsonOutputFile)
 
 	// 4. Goroutine to close result channels once all workers are done
 	go func() {
@@ -211,9 +212,9 @@ func (e *Extractor) getGroupIterator() (*msgraphgocore.PageIterator[*models.Grou
 	return msgraphgocore.NewPageIterator[*models.Group](result, e.client.GetAdapter(), models.CreateGroupCollectionResponseFromDiscriminatorValue)
 }
 
-func (e *Extractor) streamJsonToFile(wg *sync.WaitGroup, results <-chan JSONGroup) {
+func streamJsonToFile(wg *sync.WaitGroup, results <-chan JSONGroup, outputFile string) {
 	defer wg.Done()
-	file, err := os.Create(e.config.JsonOutputFile)
+	file, err := os.Create(outputFile)
 	if err != nil {
 		log.Printf("Error creating JSON output file: %v", err)
 		return
@@ -248,7 +249,7 @@ func (e *Extractor) streamJsonToFile(wg *sync.WaitGroup, results <-chan JSONGrou
 	if _, err := writer.WriteString("\n]"); err != nil {
 		log.Printf("Error writing closing bracket to JSON file: %v", err)
 	}
-	log.Printf("Successfully wrote JSON output to %s", e.config.JsonOutputFile)
+	log.Printf("Successfully wrote JSON output to %s", outputFile)
 }
 
 func (e *Extractor) processSQLiteInserts(wg *sync.WaitGroup, results <-chan SQLiteGroupMember) {
@@ -537,25 +538,45 @@ func main() {
 		log.Fatal(err)
 	}
 
+	if config.UseCache != "" {
+		if err := runFromCache(config); err != nil {
+			log.Fatalf("Application failed while running from cache: %v", err)
+		}
+		return
+	}
+
 	// --- Application Setup ---
 	ctx := context.Background()
 
 	// Authenticate
-	cred, err := azidentity.NewAzureCLICredential(nil)
-	if err != nil {
-		log.Fatalf("Error creating credential: %v", err)
+	var cred azcore.TokenCredential
+	var tenantID string
+
+	switch config.AuthMethod {
+	case "azidentity":
+		cred, err = azidentity.NewAzureCLICredential(nil)
+		if err != nil {
+			log.Fatalf("Error creating Azure CLI credential: %v", err)
+		}
+		// Get Tenant ID for DB naming
+		tenantID, err = getTenantID(ctx, cred)
+		if err != nil {
+			log.Fatalf("Error getting tenant ID: %v", err)
+		}
+	case "clientid":
+		cred, err = azidentity.NewClientSecretCredential(config.TenantID, config.ClientID, config.ClientSecret, nil)
+		if err != nil {
+			log.Fatalf("Error creating client secret credential: %v", err)
+		}
+		tenantID = config.TenantID
+	default:
+		log.Fatalf("Unknown authentication method: %s", config.AuthMethod)
 	}
 
 	// Create Graph client
 	client, err := msgraphsdk.NewGraphServiceClientWithCredentials(cred, nil)
 	if err != nil {
 		log.Fatalf("Error creating Graph client: %v", err)
-	}
-
-	// Get Tenant ID for DB naming
-	tenantID, err := getTenantID(ctx, cred)
-	if err != nil {
-		log.Fatalf("Error getting tenant ID: %v", err)
 	}
 
 	// Determine base filename
