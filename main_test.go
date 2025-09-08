@@ -236,8 +236,8 @@ func TestLoadConfig(t *testing.T) {
 		dummyFile.Close()
 
 		testCases := []struct {
-			flag    string
-			errMsg  string
+			flag   string
+			errMsg string
 		}{
 			{"--auth", "--auth is incompatible with --use-cache"},
 			{"--pageSize", "--pageSize is incompatible with --use-cache"},
