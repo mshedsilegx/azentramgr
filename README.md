@@ -42,13 +42,13 @@ The application's behavior can be customized with the following command-line fla
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--version` | bool | `false` | Print the application version and exit. |
-| `--config` | string | `""` | Path to a JSON configuration file. Command-line flags override file values. See the "Configuration File" section for details. |
-| `--pageSize` | int | `500` | The number of items to retrieve per page for API queries. Max is 999. |
-| `--parallelJobs` | int | `16` | Number of concurrent jobs for processing groups. |
-| `--output-id` | string | `""` (dynamic) | Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID (`<tenant_id>_<timestamp>`) is generated. |
-| `--group-name` | string | `""` | Process only groups with exact names. Provide a single name or a comma-separated list (e.g., `"UAT Users,Admins"`). |
-| `--group-match` | string | `""` | Process groups using a partial match. Use `*` as a wildcard. E.g., `'Proj*'`, `'*Test*'`. Quote argument to avoid shell globbing. |
+| `-version` | bool | `false` | Print the application version and exit. |
+| `-config` | string | `""` | Path to a JSON configuration file. Command-line flags override file values. See the "Configuration File" section for details. |
+| `-pageSize` | int | `500` | The number of items to retrieve per page for API queries. Max is 999. |
+| `-parallelJobs` | int | `16` | Number of concurrent jobs for processing groups. |
+| `-output-id` | string | `""` (dynamic) | Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID (`<tenant_id>_<timestamp>`) is generated. |
+| `-group-name` | string | `""` | Process only groups with exact names. Provide a single name or a comma-separated list (e.g., `"UAT Users,Admins"`). |
+| `-group-match` | string | `""` | Process groups using a partial match. Use `*` as a wildcard. E.g., `'Proj*'`, `'*Test*'`. Quote argument to avoid shell globbing. |
 
 > **Note:** `--group-name` and `--group-match` are mutually exclusive and cannot be used at the same time.
 
