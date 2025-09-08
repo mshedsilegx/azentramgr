@@ -47,6 +47,7 @@ The application's behavior can be customized with the following command-line fla
 | `-version` | bool | `false` | Print the application version and exit. |
 | `-auth` | string | `"azidentity"` | Authentication method. Can be `'azidentity'` (default, uses `'az login'`) or `'clientid'` (for non-interactive auth). |
 | `-config` | string | `""` | Path to a JSON configuration file. Command-line flags override file values. See the "Configuration File" section for details. |
+| `-use-cache` | string | `""` | Path to a SQLite DB file to use as a cache. If specified, all queries are run against this local DB instead of the Graph API. |
 | `-pageSize` | int | `500` | The number of items to retrieve per page for API queries. Max is 999. |
 | `-parallelJobs` | int | `16` | Number of concurrent jobs for processing groups. |
 | `-output-id` | string | `""` (dynamic) | Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID (`<tenant_id>_<timestamp>`) is generated. |
@@ -126,6 +127,14 @@ To run the tool using a service principal, set the `-auth` flag to `clientid` an
 ./azentramgr --auth clientid --group-name "My Production Group"
 ```
 
+### Querying from a Local Cache
+After running an extraction once, a SQLite database file is created. You can use this file as a local cache for subsequent queries to get instant, offline results without hitting the Graph API.
+```sh
+# Query the previously generated database file for a different set of groups
+./azentramgr --use-cache "prod_export.db" --group-name "Some Other Group"
+```
+> **Remark:** When using `--use-cache`, the output will be a new JSON file, but a new SQLite file will not be created. Data is read from the cache, so it may be outdated.
+
 ### Specifying Output Filenames
 To provide a custom base name for the output `.json` and `.db` files:
 ```sh
@@ -182,6 +191,7 @@ The table below lists all possible attributes that can be set in the `config.jso
 
 | JSON Key | Type | Description |
 |---|---|---|
+| `useCache` | string | Path to a SQLite DB file to use as a cache. If specified, all other options except filtering and output ID are ignored. |
 | `auth` | string | The authentication method. Can be `'azidentity'` (default) or `'clientid'`. |
 | `tenantId` | string | Your Azure tenant ID. Required when `auth` is `'clientid'`. |
 | `clientId` | string | The Application (client) ID. Required when `auth` is `'clientid'`. |

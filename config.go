@@ -19,6 +19,7 @@ type Config struct {
 	OutputID       string `json:"outputId,omitempty"`
 	GroupName      string `json:"groupName,omitempty"`
 	GroupMatch     string `json:"groupMatch,omitempty"`
+	UseCache       string `json:"useCache,omitempty"`
 	JsonOutputFile string `json:"jsonOutputFile,omitempty"` // The full path to the JSON output file
 }
 
@@ -29,6 +30,7 @@ func LoadConfig() (Config, error) {
 	// --- Flag Definition ---
 	auth := flag.String("auth", "azidentity", "Authentication method: 'azidentity' or 'clientid'.")
 	configFilePath := flag.String("config", "", "Path to a JSON configuration file. Command-line flags override file values.")
+	useCache := flag.String("use-cache", "", "Path to a SQLite DB file to use as a cache for queries instead of the Graph API.")
 	versionFlag := flag.Bool("version", false, "Print the version and exit.")
 	pageSize := flag.Int("pageSize", 500, "The number of items to retrieve per page for API queries. Max is 999.")
 	parallelJobs := flag.Int("parallelJobs", 16, "Number of concurrent jobs for processing groups.")
@@ -59,6 +61,7 @@ func LoadConfig() (Config, error) {
 		OutputID:     *outputID,
 		GroupName:    *groupName,
 		GroupMatch:   *groupMatch,
+		UseCache:     *useCache,
 	}
 
 	// Load from config file if provided. This overwrites the defaults.
@@ -107,8 +110,17 @@ func LoadConfig() (Config, error) {
 	if isSet["group-match"] {
 		config.GroupMatch = *groupMatch
 	}
+	if isSet["use-cache"] {
+		config.UseCache = *useCache
+	}
 
 	// --- Validation ---
+	if config.UseCache != "" {
+		if _, err := os.Stat(config.UseCache); os.IsNotExist(err) {
+			return Config{}, fmt.Errorf("cache file does not exist: %s", config.UseCache)
+		}
+	}
+
 	if config.AuthMethod != "azidentity" && config.AuthMethod != "clientid" {
 		return Config{}, fmt.Errorf("invalid auth method: %s. Must be 'azidentity' or 'clientid'", config.AuthMethod)
 	}

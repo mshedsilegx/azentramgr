@@ -222,3 +222,149 @@ func TestLoadConfig(t *testing.T) {
 		assert.Equal(t, "env_tenant", config.TenantID) // This should be from the env var
 	})
 }
+
+func TestRunFromCache(t *testing.T) {
+	// --- 1. Setup a temporary cache database ---
+	ctx := context.Background()
+	dbFile, err := os.CreateTemp("", "test-cache-*.db")
+	require.NoError(t, err)
+	dbPath := dbFile.Name()
+	dbFile.Close() // Close the file so the database driver can open it
+	defer os.Remove(dbPath)
+
+	db, err := setupDatabase(ctx, dbPath)
+	require.NoError(t, err)
+
+	// --- 2. Populate the database with test data ---
+	users := []SQLiteUser{
+		{UserPrincipalName: "user1@test.com", GivenName: "User", Surname: "One", Mail: "user1@test.com"},
+		{UserPrincipalName: "user2@test.com", GivenName: "User", Surname: "Two", Mail: "user2@test.com"},
+		{UserPrincipalName: "user3@test.com", GivenName: "User", Surname: "Three", Mail: "user3@test.com"},
+	}
+	groups := []SQLiteGroupMember{
+		{GroupName: "Project-Alpha-Test", MemberName: "user1@test.com"},
+		{GroupName: "Project-Alpha-Test", MemberName: "user2@test.com"},
+		{GroupName: "Project-Beta-Prod", MemberName: "user3@test.com"},
+		{GroupName: "Finance-Users", MemberName: "user1@test.com"},
+	}
+
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	userStmt, err := tx.Prepare("INSERT INTO entraUsers (userPrincipalName, givenName, mail, surname) VALUES (?, ?, ?, ?)")
+	require.NoError(t, err)
+	defer userStmt.Close()
+	for _, u := range users {
+		_, err := userStmt.Exec(u.UserPrincipalName, u.GivenName, u.Mail, u.Surname)
+		require.NoError(t, err)
+	}
+	groupStmt, err := tx.Prepare("INSERT INTO entraGroups (groupName, groupMember) VALUES (?, ?)")
+	require.NoError(t, err)
+	defer groupStmt.Close()
+	for _, g := range groups {
+		_, err := groupStmt.Exec(g.GroupName, g.MemberName)
+		require.NoError(t, err)
+	}
+	err = tx.Commit()
+	require.NoError(t, err)
+	db.Close() // Close the db so the function can reopen it
+
+	// --- 3. Define and run test cases ---
+	testCases := []struct {
+		name               string
+		config             Config
+		expectedGroupCount int
+		expectedTotalUsers int
+		expectedGroups     map[string][]string // map[groupName] -> []userPrincipalNames
+	}{
+		{
+			name: "no filter",
+			config: Config{
+				UseCache: dbPath,
+				OutputID: "test-no-filter",
+			},
+			expectedGroupCount: 3,
+			expectedTotalUsers: 4,
+			expectedGroups: map[string][]string{
+				"Project-Alpha-Test": {"user1@test.com", "user2@test.com"},
+				"Project-Beta-Prod":  {"user3@test.com"},
+				"Finance-Users":      {"user1@test.com"},
+			},
+		},
+		{
+			name: "group-name exact match",
+			config: Config{
+				UseCache:  dbPath,
+				OutputID:  "test-group-name",
+				GroupName: "Finance-Users,Project-Beta-Prod",
+			},
+			expectedGroupCount: 2,
+			expectedTotalUsers: 2,
+			expectedGroups: map[string][]string{
+				"Project-Beta-Prod": {"user3@test.com"},
+				"Finance-Users":     {"user1@test.com"},
+			},
+		},
+		{
+			name: "group-match contains",
+			config: Config{
+				UseCache:   dbPath,
+				OutputID:   "test-group-match-contains",
+				GroupMatch: "Project",
+			},
+			expectedGroupCount: 2,
+			expectedTotalUsers: 3,
+			expectedGroups: map[string][]string{
+				"Project-Alpha-Test": {"user1@test.com", "user2@test.com"},
+				"Project-Beta-Prod":  {"user3@test.com"},
+			},
+		},
+		{
+			name: "group-match startsWith",
+			config: Config{
+				UseCache:   dbPath,
+				OutputID:   "test-group-match-starts",
+				GroupMatch: "Project-Alpha*",
+			},
+			expectedGroupCount: 1,
+			expectedTotalUsers: 2,
+			expectedGroups: map[string][]string{
+				"Project-Alpha-Test": {"user1@test.com", "user2@test.com"},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// --- 4. Run the function under test ---
+			err := runFromCache(tc.config)
+			require.NoError(t, err)
+
+			// --- 5. Verify the JSON output ---
+			jsonFile := tc.config.OutputID + ".json"
+			defer os.Remove(jsonFile)
+
+			content, err := os.ReadFile(jsonFile)
+			require.NoError(t, err)
+
+			var results []JSONGroup
+			err = json.Unmarshal(content, &results)
+			require.NoError(t, err)
+
+			assert.Len(t, results, tc.expectedGroupCount)
+
+			totalUsers := 0
+			resultGroups := make(map[string][]string)
+			for _, group := range results {
+				totalUsers += len(group.ADGroupMemberName)
+				var members []string
+				for _, member := range group.ADGroupMemberName {
+					members = append(members, member.UserPrincipalName)
+				}
+				resultGroups[group.ADGroupName] = members
+			}
+
+			assert.Equal(t, tc.expectedTotalUsers, totalUsers)
+			assert.Equal(t, tc.expectedGroups, resultGroups)
+		})
+	}
+}
