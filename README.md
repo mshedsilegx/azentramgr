@@ -8,7 +8,7 @@ The tool supports two authentication methods for connecting to the Microsoft Gra
 
 ### Key Features:
 - **Flexible Authentication:** Supports both interactive `az login` for local use and non-interactive `clientid` with a service principal for automated environments.
-- **Comprehensive Export:** Creates both a JSON file and a SQLite database for flexible data analysis.
+- **Dual Output Format**: Creates a human-readable JSON file for easy inspection and a powerful SQLite database. The database serves as a local, high-performance cache and enables complex queries on the extracted data.
 - **Efficient & Scalable:** Uses concurrency to fetch data quickly and streams results to keep memory usage low, even with large directories.
 - **Robust API Usage:** Implements rate limiting to respect Graph API throttling limits and correctly handles pagination to ensure all data is retrieved.
 - **Powerful Filtering:** Allows you to target specific groups using exact name matching (including lists) or performant partial matching (`contains`, `startsWith`, `endsWith`).
@@ -52,7 +52,7 @@ The application's behavior can be customized with the following command-line fla
 | `-parallelJobs` | int | `16` | Number of concurrent jobs for processing groups. |
 | `-output-id` | string | `""` (dynamic) | Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID (`<tenant_id>_<timestamp>`) is generated. |
 | `-group-name` | string | `""` | Process only groups with exact names. Provide a single name or a comma-separated list (e.g., `"UAT Users,Admins"`). |
-| `-group-match` | string | `""` | Process groups using a partial match. Use `*` as a wildcard. E.g., `'Proj*'`, `'*Test*'`. Quote argument to avoid shell globbing. |
+| `-group-match` | string | `""` | Process groups using a partial match. The input is translated to a SQL `LIKE` query. `*` is a wildcard. `Proj*` becomes `LIKE 'Proj%'`. `*Test*` becomes `LIKE '%Test%'`. An input with no wildcards like `Test` is treated as `*Test*`. Quote the argument to avoid shell globbing. |
 
 > **Note:** `--group-name` and `--group-match` are mutually exclusive and cannot be used at the same time.
 
@@ -185,6 +185,15 @@ Below are examples demonstrating how to configure the tool for different scenari
   "clientSecret": "your-client-secret-value-here",
   "outputId": "automated-export",
   "groupMatch": "PROD-*"
+}
+```
+
+**Example 4: Using the cache for a query**
+```json
+{
+  "useCache": "path/to/your/prod_export.db",
+  "outputId": "cached-finance-query",
+  "groupName": "Finance-Users"
 }
 ```
 
