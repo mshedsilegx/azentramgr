@@ -197,11 +197,11 @@ func TestLoadConfig(t *testing.T) {
 		require.NoError(t, err)
 		defer os.Remove(configFile.Name())
 		configData := map[string]interface{}{
-			"auth":       "clientid",
-			"tenantId":   "file_tenant",
-			"clientId":   "file_client",
-			"pageSize":   100,
-			"outputId":   "file_id",
+			"auth":     "clientid",
+			"tenantId": "file_tenant",
+			"clientId": "file_client",
+			"pageSize": 100,
+			"outputId": "file_id",
 		}
 		encoder := json.NewEncoder(configFile)
 		err = encoder.Encode(configData)
@@ -218,7 +218,7 @@ func TestLoadConfig(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "azidentity", config.AuthMethod)
 		assert.Equal(t, 200, config.PageSize)
-		assert.Equal(t, "file_id", config.OutputID) // This should be from the file
+		assert.Equal(t, "file_id", config.OutputID)    // This should be from the file
 		assert.Equal(t, "env_tenant", config.TenantID) // This should be from the env var
 	})
 }
