@@ -161,6 +161,19 @@ Below are two examples demonstrating how to configure the tool for different fil
 }
 ```
 
+### Complete Structure Reference
+The table below lists all possible attributes that can be set in the `config.json` file.
+
+| JSON Key | Type | Description |
+|---|---|---|
+| `pageSize` | integer | The number of items to retrieve per page for API queries. Max is 999. |
+| `parallelJobs` | integer | The number of concurrent jobs for processing groups. Default is 16. |
+| `outputId` | string | Custom base name for the output `.json` and `.db` files (e.g., "my-export"). |
+| `groupName` | string | A single group name or a comma-separated list of exact group names to process. |
+| `groupMatch` | string | A partial match string for group names, using `*` as a wildcard. |
+
+**Note:** `groupName` and `groupMatch` are mutually exclusive and should not be set at the same time in the configuration.
+
 ### Precedence
 Any flag set directly on the command line will **always override** the corresponding value in the configuration file. For example, if your `config.json` specifies `parallelJobs: 16`, running the following command will execute with 32 jobs:
 ```sh
