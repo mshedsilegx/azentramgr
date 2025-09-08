@@ -28,9 +28,6 @@ import (
 
 var version = "dev"
 
-
-
-
 // Extractor holds the application's state and logic.
 type Extractor struct {
 	config         Config
@@ -496,7 +493,6 @@ func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseabl
 }
 
 // --- Helper functions that do not depend on Extractor state ---
-
 
 func (e *Extractor) processUserInserts(wg *sync.WaitGroup, users <-chan SQLiteUser) {
 	defer wg.Done()
