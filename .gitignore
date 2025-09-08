@@ -1,6 +1,9 @@
 # Ignore Go build output
-azentra
+azentramgr
 *.exe
 
 # Ignore SQLite database files
 *.db
+
+# Ignore backup files
+*.0*
