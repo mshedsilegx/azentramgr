@@ -11,8 +11,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"regexp"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -62,10 +62,11 @@ type SQLiteUser struct {
 
 // Config holds the configuration options for the extractor.
 type Config struct {
-	PageSize         int
-	OutputID         string
-	GroupFilterRegex string
-	JsonOutputFile   string // The full path to the JSON output file
+	PageSize       int
+	OutputID       string
+	GroupName      string
+	GroupMatch     string
+	JsonOutputFile string // The full path to the JSON output file
 }
 
 // Extractor holds the application's state and logic.
@@ -75,7 +76,6 @@ type Extractor struct {
 	client         *msgraphsdk.GraphServiceClient
 	db             *sql.DB
 	limiter        *rate.Limiter
-	groupFilter    *regexp.Regexp
 	tenantID       string
 	totalGroups    atomic.Int64
 	processedCount atomic.Int64
@@ -84,25 +84,13 @@ type Extractor struct {
 
 // NewExtractor creates and initializes a new Extractor.
 func NewExtractor(ctx context.Context, config Config, client *msgraphsdk.GraphServiceClient, db *sql.DB, tenantID string) (*Extractor, error) {
-	// Compile regex
-	var groupFilter *regexp.Regexp
-	if config.GroupFilterRegex != "" {
-		var err error
-		groupFilter, err = regexp.Compile(config.GroupFilterRegex)
-		if err != nil {
-			return nil, fmt.Errorf("error compiling group filter regex: %w", err)
-		}
-		log.Printf("Filtering groups by regex: %s", config.GroupFilterRegex)
-	}
-
 	return &Extractor{
-		config:      config,
-		ctx:         ctx,
-		client:      client,
-		db:          db,
-		limiter:     rate.NewLimiter(rate.Limit(15), 1),
-		groupFilter: groupFilter,
-		tenantID:    tenantID,
+		config:   config,
+		ctx:      ctx,
+		client:   client,
+		db:       db,
+		limiter:  rate.NewLimiter(rate.Limit(15), 1),
+		tenantID: tenantID,
 	}, nil
 }
 
@@ -110,13 +98,20 @@ func NewExtractor(ctx context.Context, config Config, client *msgraphsdk.GraphSe
 func (e *Extractor) Run() error {
 	defer e.db.Close()
 
-	// 1. Get total count of ALL groups for progress reporting.
-	// This is an estimate if a filter is used.
+	// 1. Get total count of groups for progress reporting.
 	totalGroupsInTenant, err := e.getGroupCount()
 	if err != nil {
 		return fmt.Errorf("could not get total group count: %w", err)
 	}
-	log.Printf("Found %d total groups in tenant. Starting scan...", totalGroupsInTenant)
+
+	// Adjust logging based on filter type
+	if e.config.GroupName != "" {
+		log.Printf("Found %d group(s) matching the provided exact name(s). Starting extraction.", totalGroupsInTenant)
+	} else if e.config.GroupMatch != "" {
+		log.Printf("Found %d group(s) matching the partial search. Starting extraction.", totalGroupsInTenant)
+	} else {
+		log.Printf("Found %d total groups in tenant. Starting full scan...", totalGroupsInTenant)
+	}
 
 	// 2. Setup channels and wait groups for concurrent processing
 	groupTasks := make(chan *models.Group, 100)
@@ -167,10 +162,10 @@ func (e *Extractor) Run() error {
 				log.Printf("Scanning groups... [%d/%d]", scannedCount, totalGroupsInTenant)
 			}
 
-			if e.groupFilter == nil || (group.GetDisplayName() != nil && e.groupFilter.MatchString(*group.GetDisplayName())) {
-				matchingCount++
-				groupTasks <- group
-			}
+			// All filtering is now done server-side via the $filter query parameter.
+			// Every group returned by the iterator is a match.
+			matchingCount++
+			groupTasks <- group
 			return true
 		})
 		if err != nil {
@@ -193,9 +188,51 @@ func (e *Extractor) Run() error {
 func (e *Extractor) getGroupCount() (int32, error) {
 	headers := abstractions.NewRequestHeaders()
 	headers.Add("ConsistencyLevel", "eventual")
+
+	// Create a new request configuration
 	requestConfiguration := &groups.CountRequestBuilderGetRequestConfiguration{
 		Headers: headers,
 	}
+
+	// Build the filter string based on the command-line flags
+	var filter *string
+	if e.config.GroupName != "" {
+		groupNames := strings.Split(e.config.GroupName, ",")
+		var filterClauses []string
+		for _, name := range groupNames {
+			trimmedName := strings.TrimSpace(name)
+			if trimmedName != "" {
+				sanitizedName := strings.ReplaceAll(trimmedName, "'", "''")
+				filterClauses = append(filterClauses, fmt.Sprintf("displayName eq '%s'", sanitizedName))
+			}
+		}
+		if len(filterClauses) > 0 {
+			filter = strPtr(strings.Join(filterClauses, " or "))
+		}
+	} else if e.config.GroupMatch != "" {
+		matchStr := strings.TrimSpace(e.config.GroupMatch)
+		sanitizedMatchStr := strings.ReplaceAll(matchStr, "'", "''")
+		var filterClause string
+		if !strings.HasPrefix(sanitizedMatchStr, "*") && !strings.HasSuffix(sanitizedMatchStr, "*") && strings.Count(sanitizedMatchStr, "*") == 1 {
+			parts := strings.SplitN(sanitizedMatchStr, "*", 2)
+			filterClause = fmt.Sprintf("startsWith(tolower(displayName), '%s') and endsWith(tolower(displayName), '%s')", strings.ToLower(parts[0]), strings.ToLower(parts[1]))
+		} else if strings.HasPrefix(sanitizedMatchStr, "*") && strings.HasSuffix(sanitizedMatchStr, "*") {
+			filterClause = fmt.Sprintf("contains(tolower(displayName), '%s')", strings.ToLower(strings.Trim(sanitizedMatchStr, "*")))
+		} else if strings.HasSuffix(sanitizedMatchStr, "*") {
+			filterClause = fmt.Sprintf("startsWith(tolower(displayName), '%s')", strings.ToLower(strings.TrimSuffix(sanitizedMatchStr, "*")))
+		} else if strings.HasPrefix(sanitizedMatchStr, "*") {
+			filterClause = fmt.Sprintf("endsWith(tolower(displayName), '%s')", strings.ToLower(strings.TrimPrefix(sanitizedMatchStr, "*")))
+		} else {
+			filterClause = fmt.Sprintf("contains(tolower(displayName), '%s')", strings.ToLower(sanitizedMatchStr))
+		}
+		filter = strPtr(filterClause)
+	}
+
+	// Unlike the main Get() request, the Count() request takes the filter directly in its query parameters.
+	requestConfiguration.QueryParameters = &groups.CountRequestBuilderGetQueryParameters{
+		Filter: filter,
+	}
+
 	count, err := e.client.Groups().Count().Get(e.ctx, requestConfiguration)
 	if err != nil {
 		return 0, err
@@ -420,7 +457,61 @@ func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseabl
 		Orderby: []string{"displayName asc"},
 		Top:     int32Ptr(e.config.PageSize),
 	}
-	options := &groups.GroupsRequestBuilderGetRequestConfiguration{QueryParameters: requestParameters}
+
+	// Add filter based on provided flags
+	if e.config.GroupName != "" {
+		// Exact match for one or more group names
+		groupNames := strings.Split(e.config.GroupName, ",")
+		var filterClauses []string
+		for _, name := range groupNames {
+			trimmedName := strings.TrimSpace(name)
+			if trimmedName != "" {
+				sanitizedName := strings.ReplaceAll(trimmedName, "'", "''")
+				filterClauses = append(filterClauses, fmt.Sprintf("displayName eq '%s'", sanitizedName))
+			}
+		}
+		if len(filterClauses) > 0 {
+			requestParameters.Filter = strPtr(strings.Join(filterClauses, " or "))
+			log.Printf("Filtering for groups with exact names: %s", e.config.GroupName)
+		}
+	} else if e.config.GroupMatch != "" {
+		// Partial match using startsWith, endsWith, contains, or a combination
+		matchStr := strings.TrimSpace(e.config.GroupMatch)
+		sanitizedMatchStr := strings.ReplaceAll(matchStr, "'", "''")
+
+		var filter string
+		var matchType string
+
+		if !strings.HasPrefix(sanitizedMatchStr, "*") && !strings.HasSuffix(sanitizedMatchStr, "*") && strings.Count(sanitizedMatchStr, "*") == 1 {
+			matchType = "starting and ending with"
+			parts := strings.SplitN(sanitizedMatchStr, "*", 2)
+			startsWith := parts[0]
+			endsWith := parts[1]
+			filter = fmt.Sprintf("startsWith(tolower(displayName), '%s') and endsWith(tolower(displayName), '%s')", strings.ToLower(startsWith), strings.ToLower(endsWith))
+		} else if strings.HasPrefix(sanitizedMatchStr, "*") && strings.HasSuffix(sanitizedMatchStr, "*") {
+			matchType = "containing"
+			filter = fmt.Sprintf("contains(tolower(displayName), '%s')", strings.ToLower(strings.Trim(sanitizedMatchStr, "*")))
+		} else if strings.HasSuffix(sanitizedMatchStr, "*") {
+			matchType = "starting with"
+			filter = fmt.Sprintf("startsWith(tolower(displayName), '%s')", strings.ToLower(strings.TrimSuffix(sanitizedMatchStr, "*")))
+		} else if strings.HasPrefix(sanitizedMatchStr, "*") {
+			matchType = "ending with"
+			filter = fmt.Sprintf("endsWith(tolower(displayName), '%s')", strings.ToLower(strings.TrimPrefix(sanitizedMatchStr, "*")))
+		} else {
+			// Default to contains if no wildcards
+			matchType = "containing"
+			filter = fmt.Sprintf("contains(tolower(displayName), '%s')", strings.ToLower(sanitizedMatchStr))
+		}
+		requestParameters.Filter = strPtr(filter)
+		log.Printf("Filtering for groups %s: '%s'", matchType, matchStr)
+	}
+
+	options := &groups.GroupsRequestBuilderGetRequestConfiguration{
+		QueryParameters: requestParameters,
+		Headers:         abstractions.NewRequestHeaders(),
+	}
+	// Required for advanced queries like $filter on displayName and $count
+	options.Headers.Add("ConsistencyLevel", "eventual")
 
 	result, err := e.client.Groups().Get(e.ctx, options)
 	if err != nil {
@@ -447,6 +538,10 @@ func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseabl
 func int32Ptr(i int) *int32 {
 	v := int32(i)
 	return &v
+}
+
+func strPtr(s string) *string {
+	return &s
 }
 
 func getTenantID(ctx context.Context, cred *azidentity.AzureCLICredential) (string, error) {
@@ -547,7 +642,8 @@ func main() {
 	versionFlag := flag.Bool("version", false, "Print the version and exit.")
 	flag.IntVar(&config.PageSize, "pageSize", 500, "The number of items to retrieve per page for API queries. Max is 999.")
 	flag.StringVar(&config.OutputID, "output-id", "", "Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID is generated.")
-	flag.StringVar(&config.GroupFilterRegex, "group-filter-regex", "", "Optional regex to filter groups by name. Note: complex patterns can cause performance issues (ReDoS).")
+	flag.StringVar(&config.GroupName, "group-name", "", "Exact name of a single group, or a comma-separated list of group names, to process.")
+	flag.StringVar(&config.GroupMatch, "group-match", "", "Partial match for a group name. Use '*' as a wildcard. E.g., 'Proj*', '*Test*', 'Start*End'. Defaults to 'contains' if no wildcards. Quote argument to avoid shell globbing.")
 	flag.Parse()
 
 	if *versionFlag {
@@ -558,6 +654,9 @@ func main() {
 	// Validate flags
 	if config.PageSize > 999 || config.PageSize < 1 {
 		log.Fatalf("Error: pageSize must be between 1 and 999.")
+	}
+	if config.GroupName != "" && config.GroupMatch != "" {
+		log.Fatalf("Error: --group-name and --group-match cannot be used at the same time.")
 	}
 
 	// --- Application Setup ---
