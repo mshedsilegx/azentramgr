@@ -195,15 +195,15 @@ func (e *Extractor) getGroupCount() (int32, error) {
 		var filterClause string
 		if !strings.HasPrefix(sanitizedMatchStr, "*") && !strings.HasSuffix(sanitizedMatchStr, "*") && strings.Count(sanitizedMatchStr, "*") == 1 {
 			parts := strings.SplitN(sanitizedMatchStr, "*", 2)
-			filterClause = fmt.Sprintf("startsWith(tolower(displayName), '%s') and endsWith(tolower(displayName), '%s')", strings.ToLower(parts[0]), strings.ToLower(parts[1]))
+			filterClause = fmt.Sprintf("startsWith(displayName, '%s') and endsWith(displayName, '%s')", parts[0], parts[1])
 		} else if strings.HasPrefix(sanitizedMatchStr, "*") && strings.HasSuffix(sanitizedMatchStr, "*") {
-			filterClause = fmt.Sprintf("contains(tolower(displayName), '%s')", strings.ToLower(strings.Trim(sanitizedMatchStr, "*")))
+			filterClause = fmt.Sprintf("contains(displayName, '%s')", strings.Trim(sanitizedMatchStr, "*"))
 		} else if strings.HasSuffix(sanitizedMatchStr, "*") {
-			filterClause = fmt.Sprintf("startsWith(tolower(displayName), '%s')", strings.ToLower(strings.TrimSuffix(sanitizedMatchStr, "*")))
+			filterClause = fmt.Sprintf("startsWith(displayName, '%s')", strings.TrimSuffix(sanitizedMatchStr, "*"))
 		} else if strings.HasPrefix(sanitizedMatchStr, "*") {
-			filterClause = fmt.Sprintf("endsWith(tolower(displayName), '%s')", strings.ToLower(strings.TrimPrefix(sanitizedMatchStr, "*")))
+			filterClause = fmt.Sprintf("endsWith(displayName, '%s')", strings.TrimPrefix(sanitizedMatchStr, "*"))
 		} else {
-			filterClause = fmt.Sprintf("contains(tolower(displayName), '%s')", strings.ToLower(sanitizedMatchStr))
+			filterClause = fmt.Sprintf("contains(displayName, '%s')", sanitizedMatchStr)
 		}
 		filter = strPtr(filterClause)
 	}
@@ -530,20 +530,20 @@ func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseabl
 			parts := strings.SplitN(sanitizedMatchStr, "*", 2)
 			startsWith := parts[0]
 			endsWith := parts[1]
-			filter = fmt.Sprintf("startsWith(tolower(displayName), '%s') and endsWith(tolower(displayName), '%s')", strings.ToLower(startsWith), strings.ToLower(endsWith))
+			filter = fmt.Sprintf("startsWith(displayName, '%s') and endsWith(displayName, '%s')", startsWith, endsWith)
 		} else if strings.HasPrefix(sanitizedMatchStr, "*") && strings.HasSuffix(sanitizedMatchStr, "*") {
 			matchType = "containing"
-			filter = fmt.Sprintf("contains(tolower(displayName), '%s')", strings.ToLower(strings.Trim(sanitizedMatchStr, "*")))
+			filter = fmt.Sprintf("contains(displayName, '%s')", strings.Trim(sanitizedMatchStr, "*"))
 		} else if strings.HasSuffix(sanitizedMatchStr, "*") {
 			matchType = "starting with"
-			filter = fmt.Sprintf("startsWith(tolower(displayName), '%s')", strings.ToLower(strings.TrimSuffix(sanitizedMatchStr, "*")))
+			filter = fmt.Sprintf("startsWith(displayName, '%s')", strings.TrimSuffix(sanitizedMatchStr, "*"))
 		} else if strings.HasPrefix(sanitizedMatchStr, "*") {
 			matchType = "ending with"
-			filter = fmt.Sprintf("endsWith(tolower(displayName), '%s')", strings.ToLower(strings.TrimPrefix(sanitizedMatchStr, "*")))
+			filter = fmt.Sprintf("endsWith(displayName, '%s')", strings.TrimPrefix(sanitizedMatchStr, "*"))
 		} else {
 			// Default to contains if no wildcards
 			matchType = "containing"
-			filter = fmt.Sprintf("contains(tolower(displayName), '%s')", strings.ToLower(sanitizedMatchStr))
+			filter = fmt.Sprintf("contains(displayName, '%s')", sanitizedMatchStr)
 		}
 		requestParameters.Filter = strPtr(filter)
 		log.Printf("Filtering for groups %s: '%s'", matchType, matchStr)

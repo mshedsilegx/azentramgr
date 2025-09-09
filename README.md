@@ -52,15 +52,13 @@ The application's behavior can be customized with the following command-line fla
 | `-parallelJobs` | int | `16` | Number of concurrent jobs for processing groups. |
 | `-output-id` | string | `""` (dynamic) | Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID (`<tenant_id>_<timestamp>`) is generated. |
 | `-group-name` | string | `""` | Process only groups with exact names. Provide a single name or a comma-separated list (e.g., `"UAT Users,Admins"`). This match is **case-sensitive**. |
-| `-group-match` | string | `""` | Process groups using a partial match. The input is translated to a SQL `LIKE` query. `*` is a wildcard. `Proj*` becomes `LIKE 'Proj%'`. `*Test*` becomes `LIKE '%Test%'`. An input with no wildcards like `Test` is treated as `*Test*`. Quote the argument to avoid shell globbing. |
+| `-group-match` | string | `""` | Process groups using a partial match. `*` is a wildcard. `Proj*` finds groups starting with "Proj". `*Test*` finds groups containing "Test". Quote the argument to avoid shell globbing. This match is **case-sensitive**. |
 
 > **Note:** `--group-name` and `--group-match` are mutually exclusive and cannot be used at the same time.
 
 ### Important Notes on Filtering
-*   **Case-Sensitivity**: Due to Microsoft Graph API limitations, the behavior differs between filter types:
-    *   `--group-name` performs a **case-sensitive** exact match.
-    *   `--group-match` performs a **case-insensitive** partial match.
-*   **Progress Display for Partial Matches**: When using `--group-match`, the total number of groups to be processed is not known upfront (again, due to API limitations on counting with partial filters). The application will note this when starting and will display the final total of processed groups upon completion.
+*   **Case-Sensitivity**: Due to Microsoft Graph API limitations, both the `--group-name` and `--group-match` filters are **case-sensitive**.
+*   **Progress Display for Partial Matches**: When using `--group-match`, the total number of groups to be processed is not known upfront (due to API limitations on counting with partial filters). The application will note this when starting and will display the final total of processed groups upon completion.
 
 ## 4. Examples on How to Use
 
