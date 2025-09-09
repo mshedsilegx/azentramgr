@@ -45,10 +45,13 @@ The application's behavior can be customized with the following command-line fla
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `-version` | bool | `false` | Print the application version and exit. |
+| `-healthcheck` | bool | `false` | Check connectivity and authentication to the Entra Tenant and exit. |
 | `-auth` | string | `"azidentity"` | Authentication method. Can be `'azidentity'` (default, uses `'az login'`) or `'clientid'` (for non-interactive auth). |
+| `-tenantid` | string | `""` | Optional: Force a specific tenant ID, overriding auto-detection or config file values. |
 | `-config` | string | `""` | Path to a JSON configuration file. Command-line flags override file values. See the "Configuration File" section for details. |
 | `-use-cache` | string | `""` | Path to a SQLite DB file to use as a cache. If specified, all queries are run against this local DB instead of the Graph API. |
 | `-pageSize` | int | `500` | The number of items to retrieve per page for API queries. Max is 999. |
+| `-group-list-only` | bool | `false` | List groups only; do not fetch or process group members. |
 | `-parallelJobs` | int | `16` | Number of concurrent jobs for processing groups in the `-group-match` workflow. |
 | `-output-id` | string | `""` (dynamic) | Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID (`<tenant_id>_<timestamp>`) is generated. |
 | `-group-name` | string | `""` | Process only groups with exact names. Provide a single name or a comma-separated list (e.g., `"UAT Users,Admins"`). This match is **case-insensitive**. |
@@ -122,6 +125,25 @@ This flag uses wildcards (`*`) to perform `contains`, `startsWith`, or `endsWith
 ```sh
 # Finds group names starting with "PROD-"
 ./azentramgr --group-match "PROD-*"
+```
+
+### Utility and Diagnostic Examples
+
+#### Health Check
+To verify connectivity and authentication without extracting any data, use the `--healthcheck` flag. This is a great way to ensure your credentials are valid.
+```sh
+./azentramgr --healthcheck
+```
+On success, it will return a JSON object with the tenant's group count, tenant ID, and the current user principal name.
+
+#### List Groups Only
+To get a list of group names without fetching their members, use the `--group-list-only` flag. This can be combined with filters.
+```sh
+# Get all group names in the tenant
+./azentramgr --group-list-only
+
+# Get names of groups starting with "PROD-"
+./azentramgr --group-list-only --group-match "PROD-*"
 ```
 
 ### Using Non-Interactive Authentication
