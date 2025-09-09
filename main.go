@@ -454,10 +454,14 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 
 func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseable, error) {
 	requestParameters := &groups.GroupsRequestBuilderGetQueryParameters{
-		Select:  []string{"displayName", "id"},
-		Expand:  []string{fmt.Sprintf("members($select=givenName,mail,surname,userPrincipalName;$top=%d)", e.config.PageSize)},
-		Orderby: []string{"displayName asc"},
-		Top:     int32Ptr(e.config.PageSize),
+		Select: []string{"displayName", "id"},
+		Expand: []string{fmt.Sprintf("members($select=givenName,mail,surname,userPrincipalName;$top=%d)", e.config.PageSize)},
+		Top:    int32Ptr(e.config.PageSize),
+	}
+
+	// Conditionally add Orderby. Graph API does not support sorting when filtering on displayName.
+	if e.config.GroupName == "" && e.config.GroupMatch == "" {
+		requestParameters.Orderby = []string{"displayName asc"}
 	}
 
 	// Add filter based on provided flags
