@@ -183,7 +183,7 @@ func (e *Extractor) getGroupCount() (int32, error) {
 			trimmedName := strings.TrimSpace(name)
 			if trimmedName != "" {
 				sanitizedName := strings.ReplaceAll(trimmedName, "'", "''")
-				filterClauses = append(filterClauses, fmt.Sprintf("tolower(displayName) eq '%s'", strings.ToLower(sanitizedName)))
+				filterClauses = append(filterClauses, fmt.Sprintf("displayName eq '%s'", sanitizedName))
 			}
 		}
 		if len(filterClauses) > 0 {
@@ -421,10 +421,38 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 			}
 		}
 
-		if group.GetMembers() != nil {
-			processAndDispatch(group.GetMembers())
+		// If members were not expanded in the initial query (e.g., for a group-match search),
+		// we need to fetch them manually.
+		var membersToProcess []models.DirectoryObjectable
+		if group.GetMembers() == nil && e.config.GroupMatch != "" {
+			// Manually fetch members for this group
+			headers := abstractions.NewRequestHeaders()
+			headers.Add("ConsistencyLevel", "eventual")
+			requestParameters := &groups.ItemMembersRequestBuilderGetQueryParameters{
+				Select: []string{"givenName", "mail", "surname", "userPrincipalName"},
+				Top:    int32Ptr(e.config.PageSize),
+			}
+			options := &groups.ItemMembersRequestBuilderGetRequestConfiguration{
+				Headers:         headers,
+				QueryParameters: requestParameters,
+			}
+
+			result, err := e.client.Groups().ByGroupId(*group.GetId()).Members().Get(e.ctx, options)
+			if err != nil {
+				log.Printf("Error manually fetching members for group %s: %v", groupName, err)
+			} else {
+				membersToProcess = result.GetValue()
+			}
+		} else if group.GetMembers() != nil {
+			membersToProcess = group.GetMembers()
 		}
 
+		// Process the members (either pre-fetched or manually fetched)
+		if membersToProcess != nil {
+			processAndDispatch(membersToProcess)
+		}
+
+		// Handle pagination for members
 		var nextLink *string
 		if val, ok := group.GetAdditionalData()["members@odata.nextLink"]; ok && val != nil {
 			if s, ok := val.(*string); ok {
@@ -460,13 +488,17 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseable, error) {
 	requestParameters := &groups.GroupsRequestBuilderGetQueryParameters{
 		Select: []string{"displayName", "id"},
-		Expand: []string{fmt.Sprintf("members($select=givenName,mail,surname,userPrincipalName;$top=%d)", e.config.PageSize)},
 		Top:    int32Ptr(e.config.PageSize),
 	}
 
 	// Conditionally add Orderby. Graph API does not support sorting when filtering on displayName.
 	if e.config.GroupName == "" && e.config.GroupMatch == "" {
 		requestParameters.Orderby = []string{"displayName asc"}
+	}
+
+	// Conditionally add Expand. Graph API does not support expanding members when using a partial-text filter.
+	if e.config.GroupMatch == "" {
+		requestParameters.Expand = []string{fmt.Sprintf("members($select=givenName,mail,surname,userPrincipalName;$top=%d)", e.config.PageSize)}
 	}
 
 	// Add filter based on provided flags
@@ -478,7 +510,7 @@ func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseabl
 			trimmedName := strings.TrimSpace(name)
 			if trimmedName != "" {
 				sanitizedName := strings.ReplaceAll(trimmedName, "'", "''")
-				filterClauses = append(filterClauses, fmt.Sprintf("tolower(displayName) eq '%s'", strings.ToLower(sanitizedName)))
+				filterClauses = append(filterClauses, fmt.Sprintf("displayName eq '%s'", sanitizedName))
 			}
 		}
 		if len(filterClauses) > 0 {
