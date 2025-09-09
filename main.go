@@ -76,18 +76,23 @@ func (e *Extractor) Run() error {
 	defer e.db.Close()
 
 	// 1. Get total count of groups for progress reporting.
-	totalGroupsInTenant, err := e.getGroupCount()
-	if err != nil {
-		return fmt.Errorf("could not get total group count: %w", err)
-	}
-
-	// Adjust logging based on filter type
-	if e.config.GroupName != "" {
-		log.Printf("Found %d group(s) matching the provided exact name(s). Starting extraction.", totalGroupsInTenant)
-	} else if e.config.GroupMatch != "" {
-		log.Printf("Found %d group(s) matching the partial search. Starting extraction.", totalGroupsInTenant)
+	// The Graph API's $count endpoint does not support complex filters like startsWith,
+	// so we skip the count for partial matches to avoid an "Unsupported Query" error.
+	var totalGroupsInTenant int32
+	var err error
+	if e.config.GroupMatch != "" {
+		log.Println("Note: A total count is not available for partial matches. Starting extraction...")
+		totalGroupsInTenant = 0 // Set to 0, progress will be shown without a total.
 	} else {
-		log.Printf("Found %d total groups in tenant. Starting full scan...", totalGroupsInTenant)
+		totalGroupsInTenant, err = e.getGroupCount()
+		if err != nil {
+			return fmt.Errorf("could not get total group count: %w", err)
+		}
+		if e.config.GroupName != "" {
+			log.Printf("Found %d group(s) matching the provided exact name(s). Starting extraction.", totalGroupsInTenant)
+		} else {
+			log.Printf("Found %d total groups in tenant. Starting full scan...", totalGroupsInTenant)
+		}
 	}
 
 	// 2. Setup channels and wait groups for concurrent processing
@@ -178,7 +183,7 @@ func (e *Extractor) getGroupCount() (int32, error) {
 			trimmedName := strings.TrimSpace(name)
 			if trimmedName != "" {
 				sanitizedName := strings.ReplaceAll(trimmedName, "'", "''")
-				filterClauses = append(filterClauses, fmt.Sprintf("displayName eq '%s'", sanitizedName))
+				filterClauses = append(filterClauses, fmt.Sprintf("tolower(displayName) eq '%s'", strings.ToLower(sanitizedName)))
 			}
 		}
 		if len(filterClauses) > 0 {
@@ -473,7 +478,7 @@ func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseabl
 			trimmedName := strings.TrimSpace(name)
 			if trimmedName != "" {
 				sanitizedName := strings.ReplaceAll(trimmedName, "'", "''")
-				filterClauses = append(filterClauses, fmt.Sprintf("displayName eq '%s'", sanitizedName))
+				filterClauses = append(filterClauses, fmt.Sprintf("tolower(displayName) eq '%s'", strings.ToLower(sanitizedName)))
 			}
 		}
 		if len(filterClauses) > 0 {
