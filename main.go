@@ -40,6 +40,7 @@ type Extractor struct {
 	totalGroups    atomic.Int64
 	processedCount atomic.Int64
 	countIsReady   atomic.Bool
+	apiMutex       sync.Mutex
 }
 
 // NewExtractor creates and initializes a new Extractor.
@@ -422,71 +423,72 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 		}
 
 		// --- Member Processing Logic ---
-		// This block handles three distinct cases for fetching members:
-		// 1. Members are already expanded in the initial API call (the most efficient case).
-		// 2. The expanded members list is paginated, and we need to follow the nextLink.
-		// 3. Members were not expanded (due to API limitations with -group-match),
-		//    so we must fetch them manually, page by page.
+		// This block is wrapped in a mutex to prevent race conditions in the
+		// underlying Azure CLI credential provider when running with high concurrency.
+		func() {
+			e.apiMutex.Lock()
+			defer e.apiMutex.Unlock()
 
-		var initialMembers []models.DirectoryObjectable
-		var nextLink *string
+			var initialMembers []models.DirectoryObjectable
+			var nextLink *string
 
-		if group.GetMembers() != nil {
-			initialMembers = group.GetMembers()
-			if val, ok := group.GetAdditionalData()["members@odata.nextLink"]; ok && val != nil {
-				if s, ok := val.(*string); ok {
-					nextLink = s
+			if group.GetMembers() != nil {
+				initialMembers = group.GetMembers()
+				if val, ok := group.GetAdditionalData()["members@odata.nextLink"]; ok && val != nil {
+					if s, ok := val.(*string); ok {
+						nextLink = s
+					}
+				}
+			} else if e.config.GroupMatch != "" {
+				// Manually fetch the first page of members
+				if err := e.limiter.Wait(e.ctx); err != nil {
+					log.Printf("Error waiting for rate limiter while fetching members for group %s: %v", groupName, err)
+					return // Exit the func, releasing the lock
+				}
+
+				headers := abstractions.NewRequestHeaders()
+				headers.Add("ConsistencyLevel", "eventual")
+				requestParameters := &groups.ItemMembersRequestBuilderGetQueryParameters{
+					Select: []string{"givenName", "mail", "surname", "userPrincipalName"},
+					Top:    int32Ptr(e.config.PageSize),
+				}
+				options := &groups.ItemMembersRequestBuilderGetRequestConfiguration{
+					Headers:         headers,
+					QueryParameters: requestParameters,
+				}
+				result, err := e.client.Groups().ByGroupId(*group.GetId()).Members().Get(e.ctx, options)
+				if err != nil {
+					log.Printf("Error manually fetching members for group %s: %v", groupName, err)
+				} else {
+					initialMembers = result.GetValue()
+					nextLink = result.GetOdataNextLink()
 				}
 			}
-		} else if e.config.GroupMatch != "" {
-			// Manually fetch the first page of members
-			if err := e.limiter.Wait(e.ctx); err != nil {
-				log.Printf("Error waiting for rate limiter while fetching members for group %s: %v", groupName, err)
-				continue // Skip to the next group
+
+			// Process the first page of members
+			if initialMembers != nil {
+				processAndDispatch(initialMembers)
 			}
 
-			headers := abstractions.NewRequestHeaders()
-			headers.Add("ConsistencyLevel", "eventual")
-			requestParameters := &groups.ItemMembersRequestBuilderGetQueryParameters{
-				Select: []string{"givenName", "mail", "surname", "userPrincipalName"},
-				Top:    int32Ptr(e.config.PageSize),
-			}
-			options := &groups.ItemMembersRequestBuilderGetRequestConfiguration{
-				Headers:         headers,
-				QueryParameters: requestParameters,
-			}
-			result, err := e.client.Groups().ByGroupId(*group.GetId()).Members().Get(e.ctx, options)
-			if err != nil {
-				log.Printf("Error manually fetching members for group %s: %v", groupName, err)
-			} else {
-				initialMembers = result.GetValue()
+			// Manually handle subsequent pages if a nextLink exists
+			for nextLink != nil && *nextLink != "" {
+				if err := e.limiter.Wait(e.ctx); err != nil {
+					log.Printf("Error waiting for rate limiter while paginating members for group %s: %v", groupName, err)
+					break // Stop paginating for this group on error
+				}
+
+				// Build a new request object for the next page URL
+				nextPageRequestBuilder := groups.NewItemMembersRequestBuilder(*nextLink, e.client.GetAdapter())
+				result, err := nextPageRequestBuilder.Get(e.ctx, nil)
+				if err != nil {
+					log.Printf("Error fetching next page of members for group %s: %v", groupName, err)
+					break // Stop paginating for this group on error
+				}
+
+				processAndDispatch(result.GetValue())
 				nextLink = result.GetOdataNextLink()
 			}
-		}
-
-		// Process the first page of members
-		if initialMembers != nil {
-			processAndDispatch(initialMembers)
-		}
-
-		// Manually handle subsequent pages if a nextLink exists
-		for nextLink != nil && *nextLink != "" {
-			if err := e.limiter.Wait(e.ctx); err != nil {
-				log.Printf("Error waiting for rate limiter while paginating members for group %s: %v", groupName, err)
-				break // Stop paginating for this group on error
-			}
-
-			// Build a new request object for the next page URL
-			nextPageRequestBuilder := groups.NewItemMembersRequestBuilder(*nextLink, e.client.GetAdapter())
-			result, err := nextPageRequestBuilder.Get(e.ctx, nil)
-			if err != nil {
-				log.Printf("Error fetching next page of members for group %s: %v", groupName, err)
-				break // Stop paginating for this group on error
-			}
-
-			processAndDispatch(result.GetValue())
-			nextLink = result.GetOdataNextLink()
-		}
+		}()
 
 		jsonResults <- JSONGroup{ADGroupName: groupName, ADGroupMemberName: allJsonMembers}
 	}
