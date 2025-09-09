@@ -437,6 +437,9 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 				QueryParameters: requestParameters,
 			}
 
+			if err := e.limiter.Wait(e.ctx); err != nil {
+				log.Printf("Error waiting for rate limiter while fetching members for group %s: %v", groupName, err)
+			}
 			result, err := e.client.Groups().ByGroupId(*group.GetId()).Members().Get(e.ctx, options)
 			if err != nil {
 				log.Printf("Error manually fetching members for group %s: %v", groupName, err)
