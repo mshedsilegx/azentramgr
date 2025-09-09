@@ -252,3 +252,113 @@ For example, if your `config.json` specifies `parallelJobs: 16`, running the fol
 ```sh
 ./azentramgr --config /path/to/my_config.json --parallelJobs 32
 ```
+
+## 6. Output Details
+
+The application generates two main output files: a SQLite database and a JSON file. Both are named using the pattern `<output-id>.db` and `<output-id>.json`.
+
+### 6.1. SQLite Database
+
+The SQLite database provides a powerful way to query the extracted data locally. It contains two main tables:
+
+#### `entraUsers` Table
+This table stores detailed information about each unique user found during the extraction.
+
+| Column | Type | Description |
+|---|---|---|
+| `UserPrincipalName` | TEXT | The unique User Principal Name (UPN) of the user. **Primary Key**. |
+| `givenName` | TEXT | The user's given (first) name. |
+| `mail` | TEXT | The user's primary email address. |
+| `surname` | TEXT | The user's surname (last name). |
+| `isEnabled` | BOOLEAN | `1` if the user account is enabled, `0` otherwise. |
+
+#### `entraGroups` Table
+This table stores the relationship between groups and their members.
+
+| Column | Type | Description |
+|---|---|---|
+| `groupName` | TEXT | The display name of the Azure AD group. |
+| `groupMember` | TEXT | The User Principal Name (UPN) of a user who is a member of the group. |
+
+#### Indexes
+To improve query performance, the following indexes are automatically created:
+- `idx_groupName` on the `entraGroups(groupName)` column.
+- `idx_groupMember` on the `entraGroups(groupMember)` column.
+- `idx_userPrincipalName` (unique) on the `entraUsers(UserPrincipalName)` column.
+
+#### Example Queries
+You can query the database directly using the `sqlite3` command-line tool.
+
+**Find all members of a specific group:**
+```sh
+sqlite3 my_export.db "SELECT groupMember FROM entraGroups WHERE groupName = 'My Production Group';"
+```
+
+**Find all groups a specific user belongs to:**
+```sh
+sqlite3 my_export.db "SELECT groupName FROM entraGroups WHERE groupMember = 'user.name@example.com';"
+```
+
+**Get detailed information for all enabled users in a group:**
+```sh
+sqlite3 my_export.db "SELECT u.* FROM entraUsers u JOIN entraGroups g ON u.UserPrincipalName = g.groupMember WHERE g.groupName = 'My Production Group' AND u.isEnabled = 1;"
+```
+
+### 6.2. JSON File
+
+The JSON file provides a human-readable, hierarchical representation of the extracted data.
+
+#### Structure Specification
+The file contains a single JSON array `[]`. Each element in the array is an object that represents a single Azure AD group.
+
+**Group Object:**
+| Key | Type | Description |
+|---|---|---|
+| `ADGroupName` | String | The display name of the Azure AD group. |
+| `ADGroupMemberName`| Array | An array of User Member objects. This array will be `null` if `--group-list-only` is used. |
+
+**User Member Object:**
+| Key | Type | Description |
+|---|---|---|
+| `givenName` | String | The user's given (first) name. |
+| `mail` | String | The user's primary email address. |
+| `surname` | String | The user's surname (last name). |
+| `userPrincipalName`| String | The unique User Principal Name (UPN) of the user. |
+| `isEnabled` | Boolean | `true` if the user account is enabled, `false` otherwise. |
+
+#### Example JSON Snippet
+```json
+[
+  {
+    "ADGroupName": "Admins",
+    "ADGroupMemberName": [
+      {
+        "givenName": "Admin",
+        "mail": "admin.user@example.com",
+        "surname": "User",
+        "userPrincipalName": "admin.user@example.com",
+        "isEnabled": true
+      }
+    ]
+  },
+  {
+    "ADGroupName": "UAT Users",
+    "ADGroupMemberName": [
+      {
+        "givenName": "Test",
+        "mail": "test.user@example.com",
+        "surname": "User",
+        "userPrincipalName": "test.user@example.com",
+        "isEnabled": false
+      },
+      {
+        "givenName": "Dev",
+        "mail": "dev.user@example.com",
+        "surname": "User",
+        "userPrincipalName": "dev.user@example.com",
+        "isEnabled": true
+      }
+    ]
+  }
+]
+```
