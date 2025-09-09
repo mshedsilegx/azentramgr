@@ -421,11 +421,30 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 			}
 		}
 
-		// If members were not expanded in the initial query (e.g., for a group-match search),
-		// we need to fetch them manually.
-		var membersToProcess []models.DirectoryObjectable
-		if group.GetMembers() == nil && e.config.GroupMatch != "" {
-			// Manually fetch members for this group
+		// --- Member Processing Logic ---
+		// This block handles three distinct cases for fetching members:
+		// 1. Members are already expanded in the initial API call (the most efficient case).
+		// 2. The expanded members list is paginated, and we need to follow the nextLink.
+		// 3. Members were not expanded (due to API limitations with -group-match),
+		//    so we must fetch them manually, page by page.
+
+		var initialMembers []models.DirectoryObjectable
+		var nextLink *string
+
+		if group.GetMembers() != nil {
+			initialMembers = group.GetMembers()
+			if val, ok := group.GetAdditionalData()["members@odata.nextLink"]; ok && val != nil {
+				if s, ok := val.(*string); ok {
+					nextLink = s
+				}
+			}
+		} else if e.config.GroupMatch != "" {
+			// Manually fetch the first page of members
+			if err := e.limiter.Wait(e.ctx); err != nil {
+				log.Printf("Error waiting for rate limiter while fetching members for group %s: %v", groupName, err)
+				continue // Skip to the next group
+			}
+
 			headers := abstractions.NewRequestHeaders()
 			headers.Add("ConsistencyLevel", "eventual")
 			requestParameters := &groups.ItemMembersRequestBuilderGetQueryParameters{
@@ -436,52 +455,37 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 				Headers:         headers,
 				QueryParameters: requestParameters,
 			}
-
-			if err := e.limiter.Wait(e.ctx); err != nil {
-				log.Printf("Error waiting for rate limiter while fetching members for group %s: %v", groupName, err)
-			}
 			result, err := e.client.Groups().ByGroupId(*group.GetId()).Members().Get(e.ctx, options)
 			if err != nil {
 				log.Printf("Error manually fetching members for group %s: %v", groupName, err)
 			} else {
-				membersToProcess = result.GetValue()
-			}
-		} else if group.GetMembers() != nil {
-			membersToProcess = group.GetMembers()
-		}
-
-		// Process the members (either pre-fetched or manually fetched)
-		if membersToProcess != nil {
-			processAndDispatch(membersToProcess)
-		}
-
-		// Handle pagination for members
-		var nextLink *string
-		if val, ok := group.GetAdditionalData()["members@odata.nextLink"]; ok && val != nil {
-			if s, ok := val.(*string); ok {
-				nextLink = s
+				initialMembers = result.GetValue()
+				nextLink = result.GetOdataNextLink()
 			}
 		}
 
-		if nextLink != nil && *nextLink != "" {
-			fakeCollection := models.NewDirectoryObjectCollectionResponse()
-			fakeCollection.SetOdataNextLink(nextLink)
-			pageIterator, err := msgraphgocore.NewPageIterator[models.DirectoryObjectable](fakeCollection, e.client.GetAdapter(), models.CreateDirectoryObjectCollectionResponseFromDiscriminatorValue)
+		// Process the first page of members
+		if initialMembers != nil {
+			processAndDispatch(initialMembers)
+		}
+
+		// Manually handle subsequent pages if a nextLink exists
+		for nextLink != nil && *nextLink != "" {
+			if err := e.limiter.Wait(e.ctx); err != nil {
+				log.Printf("Error waiting for rate limiter while paginating members for group %s: %v", groupName, err)
+				break // Stop paginating for this group on error
+			}
+
+			// Build a new request object for the next page URL
+			nextPageRequestBuilder := groups.NewItemMembersRequestBuilder(*nextLink, e.client.GetAdapter())
+			result, err := nextPageRequestBuilder.Get(e.ctx, nil)
 			if err != nil {
-				log.Printf("Error creating page iterator for group %s members nextLink: %v", groupName, err)
-			} else {
-				err := pageIterator.Iterate(e.ctx, func(member models.DirectoryObjectable) bool {
-					if err := e.limiter.Wait(e.ctx); err != nil {
-						log.Printf("Error waiting for rate limiter while paginating members for group %s: %v", groupName, err)
-						return false
-					}
-					processAndDispatch([]models.DirectoryObjectable{member})
-					return true
-				})
-				if err != nil {
-					log.Printf("Error iterating members for group %s: %v", groupName, err)
-				}
+				log.Printf("Error fetching next page of members for group %s: %v", groupName, err)
+				break // Stop paginating for this group on error
 			}
+
+			processAndDispatch(result.GetValue())
+			nextLink = result.GetOdataNextLink()
 		}
 
 		jsonResults <- JSONGroup{ADGroupName: groupName, ADGroupMemberName: allJsonMembers}
