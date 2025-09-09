@@ -313,7 +313,7 @@ func (e *Extractor) processDBWrites(wg *sync.WaitGroup, requests <-chan DBWriteR
 		}
 	}()
 
-	userStmt, err := tx.PrepareContext(e.ctx, "INSERT OR IGNORE INTO entraUsers (UserPrincipalName, givenName, mail, surname) VALUES (?, ?, ?, ?)")
+	userStmt, err := tx.PrepareContext(e.ctx, "INSERT OR IGNORE INTO entraUsers (UserPrincipalName, givenName, mail, surname, isEnabled) VALUES (?, ?, ?, ?, ?)")
 	if err != nil {
 		log.Printf("Error preparing SQLite user statement: %v", err)
 		return
@@ -333,7 +333,7 @@ func (e *Extractor) processDBWrites(wg *sync.WaitGroup, requests <-chan DBWriteR
 	for req := range requests {
 		switch req.Type {
 		case UserRequest:
-			if _, err = userStmt.ExecContext(e.ctx, req.User.UserPrincipalName, req.User.GivenName, req.User.Mail, req.User.Surname); err != nil {
+			if _, err = userStmt.ExecContext(e.ctx, req.User.UserPrincipalName, req.User.GivenName, req.User.Mail, req.User.Surname, req.User.IsEnabled); err != nil {
 				log.Printf("Error executing SQLite insert for user '%s': %v", req.User.UserPrincipalName, err)
 				return // Abort on first error
 			}
@@ -382,18 +382,21 @@ func (e *Extractor) processMembers(members []models.DirectoryObjectable) ([]JSON
 			if val := m.GetSurname(); val != nil {
 				surname = *val
 			}
+			isEnabled := m.GetAccountEnabled() // This returns *bool
 
 			jsonMembers = append(jsonMembers, JSONMember{
 				GivenName:         givenName,
 				Mail:              mail,
 				Surname:           surname,
 				UserPrincipalName: upn,
+				IsEnabled:         isEnabled,
 			})
 			sqliteUsers = append(sqliteUsers, SQLiteUser{
 				UserPrincipalName: upn,
 				GivenName:         givenName,
 				Mail:              mail,
 				Surname:           surname,
+				IsEnabled:         isEnabled != nil && *isEnabled, // Dereference pointer for SQLite
 			})
 			groupMemberLinks = append(groupMemberLinks, upn)
 
@@ -470,7 +473,7 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 				headers := abstractions.NewRequestHeaders()
 				headers.Add("ConsistencyLevel", "eventual")
 				requestParameters := &groups.ItemMembersRequestBuilderGetQueryParameters{
-					Select: []string{"givenName", "mail", "surname", "userPrincipalName"},
+					Select: []string{"givenName", "mail", "surname", "userPrincipalName", "accountEnabled"},
 					Top:    int32Ptr(e.config.PageSize),
 				}
 				options := &groups.ItemMembersRequestBuilderGetRequestConfiguration{
@@ -536,7 +539,7 @@ func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseabl
 
 	// Conditionally add Expand. Graph API does not support expanding members when using a partial-text filter.
 	if e.config.GroupMatch == "" {
-		requestParameters.Expand = []string{fmt.Sprintf("members($select=givenName,mail,surname,userPrincipalName;$top=%d)", e.config.PageSize)}
+		requestParameters.Expand = []string{fmt.Sprintf("members($select=givenName,mail,surname,userPrincipalName,accountEnabled;$top=%d)", e.config.PageSize)}
 	}
 
 	// Add filter based on provided flags

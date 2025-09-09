@@ -12,6 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func boolPtr(b bool) *bool {
+	return &b
+}
+
 func TestAggregatorFunctions(t *testing.T) {
 	// 1. Define test data
 	specialGroupName := `Group Name with "Quotes" & 'Apostrophes' \/`
@@ -20,6 +24,7 @@ func TestAggregatorFunctions(t *testing.T) {
 		Surname:           `Mc'Testerson`,
 		Mail:              "testy.mctesterson@example.com",
 		UserPrincipalName: "testy.mctesterson_example.com#EXT#@yourtenant.onmicrosoft.com",
+		IsEnabled:         boolPtr(true),
 	}
 
 	// 2. Setup a temporary file-based database
@@ -69,6 +74,7 @@ func TestAggregatorFunctions(t *testing.T) {
 			GivenName:         testMember.GivenName,
 			Mail:              testMember.Mail,
 			Surname:           testMember.Surname,
+			IsEnabled:         *testMember.IsEnabled,
 		},
 	}
 	// Send a group member write request
@@ -106,12 +112,13 @@ func TestAggregatorFunctions(t *testing.T) {
 
 	// Verify entraUsers table content
 	var dbUser SQLiteUser
-	err = db.QueryRow("SELECT UserPrincipalName, givenName, mail, surname FROM entraUsers WHERE UserPrincipalName = ?", testMember.UserPrincipalName).Scan(&dbUser.UserPrincipalName, &dbUser.GivenName, &dbUser.Mail, &dbUser.Surname)
+	err = db.QueryRow("SELECT UserPrincipalName, givenName, mail, surname, isEnabled FROM entraUsers WHERE UserPrincipalName = ?", testMember.UserPrincipalName).Scan(&dbUser.UserPrincipalName, &dbUser.GivenName, &dbUser.Mail, &dbUser.Surname, &dbUser.IsEnabled)
 	require.NoError(t, err)
 	assert.Equal(t, testMember.UserPrincipalName, dbUser.UserPrincipalName)
 	assert.Equal(t, testMember.GivenName, dbUser.GivenName)
 	assert.Equal(t, testMember.Mail, dbUser.Mail)
 	assert.Equal(t, testMember.Surname, dbUser.Surname)
+	assert.Equal(t, *testMember.IsEnabled, dbUser.IsEnabled)
 }
 
 func TestLoadConfig(t *testing.T) {
@@ -284,9 +291,9 @@ func TestRunFromCache(t *testing.T) {
 
 	// --- 2. Populate the database with test data ---
 	users := []SQLiteUser{
-		{UserPrincipalName: "user1@test.com", GivenName: "User", Surname: "One", Mail: "user1@test.com"},
-		{UserPrincipalName: "user2@test.com", GivenName: "User", Surname: "Two", Mail: "user2@test.com"},
-		{UserPrincipalName: "user3@test.com", GivenName: "User", Surname: "Three", Mail: "user3@test.com"},
+		{UserPrincipalName: "user1@test.com", GivenName: "User", Surname: "One", Mail: "user1@test.com", IsEnabled: true},
+		{UserPrincipalName: "user2@test.com", GivenName: "User", Surname: "Two", Mail: "user2@test.com", IsEnabled: false},
+		{UserPrincipalName: "user3@test.com", GivenName: "User", Surname: "Three", Mail: "user3@test.com", IsEnabled: true},
 	}
 	groups := []SQLiteGroupMember{
 		{GroupName: "Project-Alpha-Test", MemberName: "user1@test.com"},
@@ -297,11 +304,11 @@ func TestRunFromCache(t *testing.T) {
 
 	tx, err := db.Begin()
 	require.NoError(t, err)
-	userStmt, err := tx.Prepare("INSERT INTO entraUsers (userPrincipalName, givenName, mail, surname) VALUES (?, ?, ?, ?)")
+	userStmt, err := tx.Prepare("INSERT INTO entraUsers (userPrincipalName, givenName, mail, surname, isEnabled) VALUES (?, ?, ?, ?, ?)")
 	require.NoError(t, err)
 	defer userStmt.Close()
 	for _, u := range users {
-		_, err := userStmt.Exec(u.UserPrincipalName, u.GivenName, u.Mail, u.Surname)
+		_, err := userStmt.Exec(u.UserPrincipalName, u.GivenName, u.Mail, u.Surname, u.IsEnabled)
 		require.NoError(t, err)
 	}
 	groupStmt, err := tx.Prepare("INSERT INTO entraGroups (groupName, groupMember) VALUES (?, ?)")
