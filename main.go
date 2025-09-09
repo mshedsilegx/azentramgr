@@ -54,6 +54,23 @@ func NewExtractor(ctx context.Context, config Config, client *msgraphsdk.GraphSe
 	}, nil
 }
 
+// RequestType differentiates between different kinds of database write requests.
+type RequestType int
+
+const (
+	// UserRequest is for inserting a user.
+	UserRequest RequestType = iota
+	// GroupMemberRequest is for inserting a group member relationship.
+	GroupMemberRequest
+)
+
+// DBWriteRequest encapsulates a request to write to the database.
+type DBWriteRequest struct {
+	Type        RequestType
+	User        SQLiteUser
+	GroupMember SQLiteGroupMember
+}
+
 // Run executes the main logic of the extractor.
 func (e *Extractor) Run() error {
 	defer e.db.Close()
@@ -76,20 +93,19 @@ func (e *Extractor) Run() error {
 	// 2. Setup channels and wait groups for concurrent processing
 	groupTasks := make(chan *models.Group, 100)
 	jsonResults := make(chan JSONGroup, 100)
-	sqliteResults := make(chan SQLiteGroupMember, 100)
-	userTasks := make(chan SQLiteUser, 100)
+	dbWriteTasks := make(chan DBWriteRequest, 200) // A single channel for all DB writes
 	var workersWg, aggregatorsWg sync.WaitGroup
 
 	// 3. Start workers and result aggregators
 	numWorkers := e.config.ParallelJobs
 	for i := 0; i < numWorkers; i++ {
 		workersWg.Add(1)
-		go e.worker(&workersWg, groupTasks, jsonResults, sqliteResults, userTasks)
+		// Pass the new unified DB write channel to the worker
+		go e.worker(&workersWg, groupTasks, jsonResults, dbWriteTasks)
 	}
 	aggregatorsWg.Add(1)
-	go e.processSQLiteInserts(&aggregatorsWg, sqliteResults)
-	aggregatorsWg.Add(1)
-	go e.processUserInserts(&aggregatorsWg, userTasks)
+	// Start a single goroutine to process all database writes
+	go e.processDBWrites(&aggregatorsWg, dbWriteTasks)
 	aggregatorsWg.Add(1)
 	go streamJsonToFile(&aggregatorsWg, jsonResults, e.config.JsonOutputFile)
 
@@ -97,8 +113,7 @@ func (e *Extractor) Run() error {
 	go func() {
 		workersWg.Wait()
 		close(jsonResults)
-		close(sqliteResults)
-		close(userTasks)
+		close(dbWriteTasks) // Close the single DB write channel
 	}()
 
 	// 5. Create a new WaitGroup for the dispatcher and run it in a goroutine
@@ -252,39 +267,64 @@ func streamJsonToFile(wg *sync.WaitGroup, results <-chan JSONGroup, outputFile s
 	log.Printf("Successfully wrote JSON output to %s", outputFile)
 }
 
-func (e *Extractor) processSQLiteInserts(wg *sync.WaitGroup, results <-chan SQLiteGroupMember) {
+// processDBWrites handles all database insertions in a single, serialized transaction.
+func (e *Extractor) processDBWrites(wg *sync.WaitGroup, requests <-chan DBWriteRequest) {
 	defer wg.Done()
 	tx, err := e.db.BeginTx(e.ctx, nil)
 	if err != nil {
-		log.Printf("Error starting SQLite transaction: %v", err)
+		log.Printf("Error starting combined SQLite transaction: %v", err)
 		return
 	}
+	// Use a deferred function to ensure the transaction is rolled back on any error path.
 	defer func() {
-		if err := tx.Rollback(); err != nil {
-			log.Printf("ERROR: transaction rollback failed: %v", err)
+		if p := recover(); p != nil {
+			tx.Rollback()
+			panic(p) // re-throw panic after Rollback
+		} else if err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil {
+				log.Printf("ERROR: transaction rollback failed: %v", rbErr)
+			}
 		}
 	}()
 
-	stmt, err := tx.PrepareContext(e.ctx, "INSERT INTO entraGroups (groupName, groupMember) VALUES (?, ?)")
+	userStmt, err := tx.PrepareContext(e.ctx, "INSERT OR IGNORE INTO entraUsers (UserPrincipalName, givenName, mail, surname) VALUES (?, ?, ?, ?)")
 	if err != nil {
-		log.Printf("Error preparing SQLite statement: %v", err)
+		log.Printf("Error preparing SQLite user statement: %v", err)
 		return
 	}
-	defer stmt.Close()
+	defer userStmt.Close()
 
-	insertCount := 0
-	for res := range results {
-		if _, err := stmt.ExecContext(e.ctx, res.GroupName, res.MemberName); err != nil {
-			log.Printf("Error executing SQLite insert for group '%s': %v", res.GroupName, err)
-			return // Abort on first error to ensure transaction rollback
+	groupStmt, err := tx.PrepareContext(e.ctx, "INSERT INTO entraGroups (groupName, groupMember) VALUES (?, ?)")
+	if err != nil {
+		log.Printf("Error preparing SQLite group statement: %v", err)
+		return
+	}
+	defer groupStmt.Close()
+
+	userInsertCount := 0
+	groupInsertCount := 0
+
+	for req := range requests {
+		switch req.Type {
+		case UserRequest:
+			if _, err = userStmt.ExecContext(e.ctx, req.User.UserPrincipalName, req.User.GivenName, req.User.Mail, req.User.Surname); err != nil {
+				log.Printf("Error executing SQLite insert for user '%s': %v", req.User.UserPrincipalName, err)
+				return // Abort on first error
+			}
+			userInsertCount++
+		case GroupMemberRequest:
+			if _, err = groupStmt.ExecContext(e.ctx, req.GroupMember.GroupName, req.GroupMember.MemberName); err != nil {
+				log.Printf("Error executing SQLite insert for group '%s': %v", req.GroupMember.GroupName, err)
+				return // Abort on first error
+			}
+			groupInsertCount++
 		}
-		insertCount++
 	}
 
-	if err := tx.Commit(); err != nil {
-		log.Printf("Error committing SQLite transaction: %v", err)
+	if err = tx.Commit(); err != nil {
+		log.Printf("Error committing combined SQLite transaction: %v", err)
 	} else {
-		log.Printf("Committed %d records to SQLite.", insertCount)
+		log.Printf("Committed %d user records and %d group membership records to SQLite.", userInsertCount, groupInsertCount)
 	}
 }
 
@@ -339,7 +379,7 @@ func (e *Extractor) processMembers(members []models.DirectoryObjectable) ([]JSON
 	return jsonMembers, sqliteUsers, groupMemberLinks
 }
 
-func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, jsonResults chan<- JSONGroup, sqliteResults chan<- SQLiteGroupMember, userTasks chan<- SQLiteUser) {
+func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, jsonResults chan<- JSONGroup, dbWriteTasks chan<- DBWriteRequest) {
 	defer wg.Done()
 	for group := range groupTasks {
 		if group == nil || group.GetId() == nil || group.GetDisplayName() == nil {
@@ -367,10 +407,10 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 			jsonMembers, sqliteUsers, groupMemberLinks := e.processMembers(members)
 			allJsonMembers = append(allJsonMembers, jsonMembers...)
 			for _, user := range sqliteUsers {
-				userTasks <- user
+				dbWriteTasks <- DBWriteRequest{Type: UserRequest, User: user}
 			}
 			for _, upn := range groupMemberLinks {
-				sqliteResults <- SQLiteGroupMember{GroupName: groupName, MemberName: upn}
+				dbWriteTasks <- DBWriteRequest{Type: GroupMemberRequest, GroupMember: SQLiteGroupMember{GroupName: groupName, MemberName: upn}}
 			}
 		}
 
@@ -494,42 +534,6 @@ func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseabl
 }
 
 // --- Helper functions that do not depend on Extractor state ---
-
-func (e *Extractor) processUserInserts(wg *sync.WaitGroup, users <-chan SQLiteUser) {
-	defer wg.Done()
-	tx, err := e.db.BeginTx(e.ctx, nil)
-	if err != nil {
-		log.Printf("Error starting SQLite transaction for users: %v", err)
-		return
-	}
-	defer func() {
-		if err := tx.Rollback(); err != nil {
-			log.Printf("ERROR: transaction rollback failed: %v", err)
-		}
-	}()
-
-	stmt, err := tx.PrepareContext(e.ctx, "INSERT OR IGNORE INTO entraUsers (UserPrincipalName, givenName, mail, surname) VALUES (?, ?, ?, ?)")
-	if err != nil {
-		log.Printf("Error preparing SQLite user statement: %v", err)
-		return
-	}
-	defer stmt.Close()
-
-	insertCount := 0
-	for user := range users {
-		if _, err := stmt.ExecContext(e.ctx, user.UserPrincipalName, user.GivenName, user.Mail, user.Surname); err != nil {
-			log.Printf("Error executing SQLite insert for user '%s': %v", user.UserPrincipalName, err)
-			return
-		}
-		insertCount++
-	}
-
-	if err := tx.Commit(); err != nil {
-		log.Printf("Error committing SQLite user transaction: %v", err)
-	} else {
-		log.Printf("Committed %d user records to SQLite.", insertCount)
-	}
-}
 
 func main() {
 	// Load configuration from flags and config file.
