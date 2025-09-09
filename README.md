@@ -49,12 +49,16 @@ The application's behavior can be customized with the following command-line fla
 | `-config` | string | `""` | Path to a JSON configuration file. Command-line flags override file values. See the "Configuration File" section for details. |
 | `-use-cache` | string | `""` | Path to a SQLite DB file to use as a cache. If specified, all queries are run against this local DB instead of the Graph API. |
 | `-pageSize` | int | `500` | The number of items to retrieve per page for API queries. Max is 999. |
-| `-parallelJobs` | int | `16` | Number of concurrent jobs for processing groups. |
+| `-parallelJobs` | int | `16` | Number of concurrent jobs for processing groups. Primarily benefits the `-group-match` workflow. |
 | `-output-id` | string | `""` (dynamic) | Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID (`<tenant_id>_<timestamp>`) is generated. |
-| `-group-name` | string | `""` | Process only groups with exact names. Provide a single name or a comma-separated list (e.g., `"UAT Users,Admins"`). |
-| `-group-match` | string | `""` | Process groups using a partial match. The input is translated to a SQL `LIKE` query. `*` is a wildcard. `Proj*` becomes `LIKE 'Proj%'`. `*Test*` becomes `LIKE '%Test%'`. An input with no wildcards like `Test` is treated as `*Test*`. Quote the argument to avoid shell globbing. |
+| `-group-name` | string | `""` | Process only groups with exact names. Provide a single name or a comma-separated list (e.g., `"UAT Users,Admins"`). This match is **case-insensitive**. |
+| `-group-match` | string | `""` | Process groups using a partial match. `*` is a wildcard. `Proj*` finds groups starting with "Proj". `*Test*` finds groups containing "Test". Quote the argument to avoid shell globbing. This match is **case-insensitive**. |
 
 > **Note:** `--group-name` and `--group-match` are mutually exclusive and cannot be used at the same time.
+
+### Important Notes on Filtering
+*   **Case-Insensitivity**: Both `--group-name` and `--group-match` filters are **case-insensitive**, per the default behavior of the Microsoft Graph API.
+*   **Progress Display for Partial Matches**: When using `--group-match`, the total number of groups to be processed is not known upfront (due to API limitations on counting with partial filters). The application will note this when starting and will display the final total of processed groups upon completion.
 
 ## 4. Examples on How to Use
 

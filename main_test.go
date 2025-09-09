@@ -49,33 +49,39 @@ func TestAggregatorFunctions(t *testing.T) {
 
 	// 5. Run the aggregator functions with test data
 	jsonResults := make(chan JSONGroup, 1)
-	sqliteGroupResults := make(chan SQLiteGroupMember, 1)
-	sqliteUserResults := make(chan SQLiteUser, 1)
+	dbWriteTasks := make(chan DBWriteRequest, 2) // Channel for both user and group writes
 	var aggregatorsWg sync.WaitGroup
 
-	aggregatorsWg.Add(3)
+	aggregatorsWg.Add(2) // One for JSON, one for the combined DB writer
 	go streamJsonToFile(&aggregatorsWg, jsonResults, extractor.config.JsonOutputFile)
-	go extractor.processSQLiteInserts(&aggregatorsWg, sqliteGroupResults)
-	go extractor.processUserInserts(&aggregatorsWg, sqliteUserResults)
+	go extractor.processDBWrites(&aggregatorsWg, dbWriteTasks)
 
 	// Send test data
 	jsonResults <- JSONGroup{
 		ADGroupName:       specialGroupName,
 		ADGroupMemberName: []JSONMember{testMember},
 	}
-	sqliteGroupResults <- SQLiteGroupMember{
-		GroupName:  specialGroupName,
-		MemberName: testMember.UserPrincipalName,
+	// Send a user write request
+	dbWriteTasks <- DBWriteRequest{
+		Type: UserRequest,
+		User: SQLiteUser{
+			UserPrincipalName: testMember.UserPrincipalName,
+			GivenName:         testMember.GivenName,
+			Mail:              testMember.Mail,
+			Surname:           testMember.Surname,
+		},
 	}
-	sqliteUserResults <- SQLiteUser{
-		UserPrincipalName: testMember.UserPrincipalName,
-		GivenName:         testMember.GivenName,
-		Mail:              testMember.Mail,
-		Surname:           testMember.Surname,
+	// Send a group member write request
+	dbWriteTasks <- DBWriteRequest{
+		Type: GroupMemberRequest,
+		GroupMember: SQLiteGroupMember{
+			GroupName:  specialGroupName,
+			MemberName: testMember.UserPrincipalName,
+		},
 	}
+
 	close(jsonResults)
-	close(sqliteGroupResults)
-	close(sqliteUserResults)
+	close(dbWriteTasks)
 
 	aggregatorsWg.Wait()
 

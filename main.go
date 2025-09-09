@@ -40,6 +40,7 @@ type Extractor struct {
 	totalGroups    atomic.Int64
 	processedCount atomic.Int64
 	countIsReady   atomic.Bool
+	apiMutex       sync.Mutex
 }
 
 // NewExtractor creates and initializes a new Extractor.
@@ -54,42 +55,63 @@ func NewExtractor(ctx context.Context, config Config, client *msgraphsdk.GraphSe
 	}, nil
 }
 
+// RequestType differentiates between different kinds of database write requests.
+type RequestType int
+
+const (
+	// UserRequest is for inserting a user.
+	UserRequest RequestType = iota
+	// GroupMemberRequest is for inserting a group member relationship.
+	GroupMemberRequest
+)
+
+// DBWriteRequest encapsulates a request to write to the database.
+type DBWriteRequest struct {
+	Type        RequestType
+	User        SQLiteUser
+	GroupMember SQLiteGroupMember
+}
+
 // Run executes the main logic of the extractor.
 func (e *Extractor) Run() error {
 	defer e.db.Close()
 
 	// 1. Get total count of groups for progress reporting.
-	totalGroupsInTenant, err := e.getGroupCount()
-	if err != nil {
-		return fmt.Errorf("could not get total group count: %w", err)
-	}
-
-	// Adjust logging based on filter type
-	if e.config.GroupName != "" {
-		log.Printf("Found %d group(s) matching the provided exact name(s). Starting extraction.", totalGroupsInTenant)
-	} else if e.config.GroupMatch != "" {
-		log.Printf("Found %d group(s) matching the partial search. Starting extraction.", totalGroupsInTenant)
+	// The Graph API's $count endpoint does not support complex filters like startsWith,
+	// so we skip the count for partial matches to avoid an "Unsupported Query" error.
+	var totalGroupsInTenant int32
+	var err error
+	if e.config.GroupMatch != "" {
+		log.Println("Note: A total count is not available for partial matches. Starting extraction...")
+		totalGroupsInTenant = 0 // Set to 0, progress will be shown without a total.
 	} else {
-		log.Printf("Found %d total groups in tenant. Starting full scan...", totalGroupsInTenant)
+		totalGroupsInTenant, err = e.getGroupCount()
+		if err != nil {
+			return fmt.Errorf("could not get total group count: %w", err)
+		}
+		if e.config.GroupName != "" {
+			log.Printf("Found %d group(s) matching the provided exact name(s). Starting extraction.", totalGroupsInTenant)
+		} else {
+			log.Printf("Found %d total groups in tenant. Starting full scan...", totalGroupsInTenant)
+		}
 	}
 
 	// 2. Setup channels and wait groups for concurrent processing
 	groupTasks := make(chan *models.Group, 100)
 	jsonResults := make(chan JSONGroup, 100)
-	sqliteResults := make(chan SQLiteGroupMember, 100)
-	userTasks := make(chan SQLiteUser, 100)
+	dbWriteTasks := make(chan DBWriteRequest, 200) // A single channel for all DB writes
 	var workersWg, aggregatorsWg sync.WaitGroup
 
 	// 3. Start workers and result aggregators
 	numWorkers := e.config.ParallelJobs
 	for i := 0; i < numWorkers; i++ {
 		workersWg.Add(1)
-		go e.worker(&workersWg, groupTasks, jsonResults, sqliteResults, userTasks)
+		// Pass the new unified DB write channel to the worker
+		go e.worker(&workersWg, groupTasks, jsonResults, dbWriteTasks)
 	}
 	aggregatorsWg.Add(1)
-	go e.processSQLiteInserts(&aggregatorsWg, sqliteResults)
-	aggregatorsWg.Add(1)
-	go e.processUserInserts(&aggregatorsWg, userTasks)
+	// Start a single goroutine to process all database writes
+	go e.processDBWrites(&aggregatorsWg, dbWriteTasks)
 	aggregatorsWg.Add(1)
 	go streamJsonToFile(&aggregatorsWg, jsonResults, e.config.JsonOutputFile)
 
@@ -97,8 +119,7 @@ func (e *Extractor) Run() error {
 	go func() {
 		workersWg.Wait()
 		close(jsonResults)
-		close(sqliteResults)
-		close(userTasks)
+		close(dbWriteTasks) // Close the single DB write channel
 	}()
 
 	// 5. Create a new WaitGroup for the dispatcher and run it in a goroutine
@@ -175,15 +196,15 @@ func (e *Extractor) getGroupCount() (int32, error) {
 		var filterClause string
 		if !strings.HasPrefix(sanitizedMatchStr, "*") && !strings.HasSuffix(sanitizedMatchStr, "*") && strings.Count(sanitizedMatchStr, "*") == 1 {
 			parts := strings.SplitN(sanitizedMatchStr, "*", 2)
-			filterClause = fmt.Sprintf("startsWith(tolower(displayName), '%s') and endsWith(tolower(displayName), '%s')", strings.ToLower(parts[0]), strings.ToLower(parts[1]))
+			filterClause = fmt.Sprintf("startsWith(displayName, '%s') and endsWith(displayName, '%s')", parts[0], parts[1])
 		} else if strings.HasPrefix(sanitizedMatchStr, "*") && strings.HasSuffix(sanitizedMatchStr, "*") {
-			filterClause = fmt.Sprintf("contains(tolower(displayName), '%s')", strings.ToLower(strings.Trim(sanitizedMatchStr, "*")))
+			filterClause = fmt.Sprintf("contains(displayName, '%s')", strings.Trim(sanitizedMatchStr, "*"))
 		} else if strings.HasSuffix(sanitizedMatchStr, "*") {
-			filterClause = fmt.Sprintf("startsWith(tolower(displayName), '%s')", strings.ToLower(strings.TrimSuffix(sanitizedMatchStr, "*")))
+			filterClause = fmt.Sprintf("startsWith(displayName, '%s')", strings.TrimSuffix(sanitizedMatchStr, "*"))
 		} else if strings.HasPrefix(sanitizedMatchStr, "*") {
-			filterClause = fmt.Sprintf("endsWith(tolower(displayName), '%s')", strings.ToLower(strings.TrimPrefix(sanitizedMatchStr, "*")))
+			filterClause = fmt.Sprintf("endsWith(displayName, '%s')", strings.TrimPrefix(sanitizedMatchStr, "*"))
 		} else {
-			filterClause = fmt.Sprintf("contains(tolower(displayName), '%s')", strings.ToLower(sanitizedMatchStr))
+			filterClause = fmt.Sprintf("contains(displayName, '%s')", sanitizedMatchStr)
 		}
 		filter = strPtr(filterClause)
 	}
@@ -252,39 +273,66 @@ func streamJsonToFile(wg *sync.WaitGroup, results <-chan JSONGroup, outputFile s
 	log.Printf("Successfully wrote JSON output to %s", outputFile)
 }
 
-func (e *Extractor) processSQLiteInserts(wg *sync.WaitGroup, results <-chan SQLiteGroupMember) {
+// processDBWrites handles all database insertions in a single, serialized transaction.
+func (e *Extractor) processDBWrites(wg *sync.WaitGroup, requests <-chan DBWriteRequest) {
 	defer wg.Done()
 	tx, err := e.db.BeginTx(e.ctx, nil)
 	if err != nil {
-		log.Printf("Error starting SQLite transaction: %v", err)
+		log.Printf("Error starting combined SQLite transaction: %v", err)
 		return
 	}
+	// Use a deferred function to ensure the transaction is rolled back on any error path.
 	defer func() {
-		if err := tx.Rollback(); err != nil {
-			log.Printf("ERROR: transaction rollback failed: %v", err)
+		if p := recover(); p != nil {
+			if rbErr := tx.Rollback(); rbErr != nil {
+				log.Printf("ERROR: transaction rollback failed during panic recovery: %v", rbErr)
+			}
+			panic(p) // re-throw panic after Rollback
+		} else if err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil {
+				log.Printf("ERROR: transaction rollback failed: %v", rbErr)
+			}
 		}
 	}()
 
-	stmt, err := tx.PrepareContext(e.ctx, "INSERT INTO entraGroups (groupName, groupMember) VALUES (?, ?)")
+	userStmt, err := tx.PrepareContext(e.ctx, "INSERT OR IGNORE INTO entraUsers (UserPrincipalName, givenName, mail, surname) VALUES (?, ?, ?, ?)")
 	if err != nil {
-		log.Printf("Error preparing SQLite statement: %v", err)
+		log.Printf("Error preparing SQLite user statement: %v", err)
 		return
 	}
-	defer stmt.Close()
+	defer userStmt.Close()
 
-	insertCount := 0
-	for res := range results {
-		if _, err := stmt.ExecContext(e.ctx, res.GroupName, res.MemberName); err != nil {
-			log.Printf("Error executing SQLite insert for group '%s': %v", res.GroupName, err)
-			return // Abort on first error to ensure transaction rollback
+	groupStmt, err := tx.PrepareContext(e.ctx, "INSERT INTO entraGroups (groupName, groupMember) VALUES (?, ?)")
+	if err != nil {
+		log.Printf("Error preparing SQLite group statement: %v", err)
+		return
+	}
+	defer groupStmt.Close()
+
+	userInsertCount := 0
+	groupInsertCount := 0
+
+	for req := range requests {
+		switch req.Type {
+		case UserRequest:
+			if _, err = userStmt.ExecContext(e.ctx, req.User.UserPrincipalName, req.User.GivenName, req.User.Mail, req.User.Surname); err != nil {
+				log.Printf("Error executing SQLite insert for user '%s': %v", req.User.UserPrincipalName, err)
+				return // Abort on first error
+			}
+			userInsertCount++
+		case GroupMemberRequest:
+			if _, err = groupStmt.ExecContext(e.ctx, req.GroupMember.GroupName, req.GroupMember.MemberName); err != nil {
+				log.Printf("Error executing SQLite insert for group '%s': %v", req.GroupMember.GroupName, err)
+				return // Abort on first error
+			}
+			groupInsertCount++
 		}
-		insertCount++
 	}
 
-	if err := tx.Commit(); err != nil {
-		log.Printf("Error committing SQLite transaction: %v", err)
+	if err = tx.Commit(); err != nil {
+		log.Printf("Error committing combined SQLite transaction: %v", err)
 	} else {
-		log.Printf("Committed %d records to SQLite.", insertCount)
+		log.Printf("Committed %d user records and %d group membership records to SQLite.", userInsertCount, groupInsertCount)
 	}
 }
 
@@ -339,7 +387,7 @@ func (e *Extractor) processMembers(members []models.DirectoryObjectable) ([]JSON
 	return jsonMembers, sqliteUsers, groupMemberLinks
 }
 
-func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, jsonResults chan<- JSONGroup, sqliteResults chan<- SQLiteGroupMember, userTasks chan<- SQLiteUser) {
+func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, jsonResults chan<- JSONGroup, dbWriteTasks chan<- DBWriteRequest) {
 	defer wg.Done()
 	for group := range groupTasks {
 		if group == nil || group.GetId() == nil || group.GetDisplayName() == nil {
@@ -367,44 +415,80 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 			jsonMembers, sqliteUsers, groupMemberLinks := e.processMembers(members)
 			allJsonMembers = append(allJsonMembers, jsonMembers...)
 			for _, user := range sqliteUsers {
-				userTasks <- user
+				dbWriteTasks <- DBWriteRequest{Type: UserRequest, User: user}
 			}
 			for _, upn := range groupMemberLinks {
-				sqliteResults <- SQLiteGroupMember{GroupName: groupName, MemberName: upn}
+				dbWriteTasks <- DBWriteRequest{Type: GroupMemberRequest, GroupMember: SQLiteGroupMember{GroupName: groupName, MemberName: upn}}
 			}
 		}
 
-		if group.GetMembers() != nil {
-			processAndDispatch(group.GetMembers())
-		}
+		// --- Member Processing Logic ---
+		// This block is wrapped in a mutex to prevent race conditions in the
+		// underlying Azure CLI credential provider when running with high concurrency.
+		func() {
+			e.apiMutex.Lock()
+			defer e.apiMutex.Unlock()
 
-		var nextLink *string
-		if val, ok := group.GetAdditionalData()["members@odata.nextLink"]; ok && val != nil {
-			if s, ok := val.(*string); ok {
-				nextLink = s
-			}
-		}
+			var initialMembers []models.DirectoryObjectable
+			var nextLink *string
 
-		if nextLink != nil && *nextLink != "" {
-			fakeCollection := models.NewDirectoryObjectCollectionResponse()
-			fakeCollection.SetOdataNextLink(nextLink)
-			pageIterator, err := msgraphgocore.NewPageIterator[models.DirectoryObjectable](fakeCollection, e.client.GetAdapter(), models.CreateDirectoryObjectCollectionResponseFromDiscriminatorValue)
-			if err != nil {
-				log.Printf("Error creating page iterator for group %s members nextLink: %v", groupName, err)
-			} else {
-				err := pageIterator.Iterate(e.ctx, func(member models.DirectoryObjectable) bool {
-					if err := e.limiter.Wait(e.ctx); err != nil {
-						log.Printf("Error waiting for rate limiter while paginating members for group %s: %v", groupName, err)
-						return false
+			if group.GetMembers() != nil {
+				initialMembers = group.GetMembers()
+				if val, ok := group.GetAdditionalData()["members@odata.nextLink"]; ok && val != nil {
+					if s, ok := val.(*string); ok {
+						nextLink = s
 					}
-					processAndDispatch([]models.DirectoryObjectable{member})
-					return true
-				})
+				}
+			} else if e.config.GroupMatch != "" {
+				// Manually fetch the first page of members
+				if err := e.limiter.Wait(e.ctx); err != nil {
+					log.Printf("Error waiting for rate limiter while fetching members for group %s: %v", groupName, err)
+					return // Exit the func, releasing the lock
+				}
+
+				headers := abstractions.NewRequestHeaders()
+				headers.Add("ConsistencyLevel", "eventual")
+				requestParameters := &groups.ItemMembersRequestBuilderGetQueryParameters{
+					Select: []string{"givenName", "mail", "surname", "userPrincipalName"},
+					Top:    int32Ptr(e.config.PageSize),
+				}
+				options := &groups.ItemMembersRequestBuilderGetRequestConfiguration{
+					Headers:         headers,
+					QueryParameters: requestParameters,
+				}
+				result, err := e.client.Groups().ByGroupId(*group.GetId()).Members().Get(e.ctx, options)
 				if err != nil {
-					log.Printf("Error iterating members for group %s: %v", groupName, err)
+					log.Printf("Error manually fetching members for group %s: %v", groupName, err)
+				} else {
+					initialMembers = result.GetValue()
+					nextLink = result.GetOdataNextLink()
 				}
 			}
-		}
+
+			// Process the first page of members
+			if initialMembers != nil {
+				processAndDispatch(initialMembers)
+			}
+
+			// Manually handle subsequent pages if a nextLink exists
+			for nextLink != nil && *nextLink != "" {
+				if err := e.limiter.Wait(e.ctx); err != nil {
+					log.Printf("Error waiting for rate limiter while paginating members for group %s: %v", groupName, err)
+					break // Stop paginating for this group on error
+				}
+
+				// Build a new request object for the next page URL
+				nextPageRequestBuilder := groups.NewItemMembersRequestBuilder(*nextLink, e.client.GetAdapter())
+				result, err := nextPageRequestBuilder.Get(e.ctx, nil)
+				if err != nil {
+					log.Printf("Error fetching next page of members for group %s: %v", groupName, err)
+					break // Stop paginating for this group on error
+				}
+
+				processAndDispatch(result.GetValue())
+				nextLink = result.GetOdataNextLink()
+			}
+		}()
 
 		jsonResults <- JSONGroup{ADGroupName: groupName, ADGroupMemberName: allJsonMembers}
 	}
@@ -412,10 +496,18 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 
 func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseable, error) {
 	requestParameters := &groups.GroupsRequestBuilderGetQueryParameters{
-		Select:  []string{"displayName", "id"},
-		Expand:  []string{fmt.Sprintf("members($select=givenName,mail,surname,userPrincipalName;$top=%d)", e.config.PageSize)},
-		Orderby: []string{"displayName asc"},
-		Top:     int32Ptr(e.config.PageSize),
+		Select: []string{"displayName", "id"},
+		Top:    int32Ptr(e.config.PageSize),
+	}
+
+	// Conditionally add Orderby. Graph API does not support sorting when filtering on displayName.
+	if e.config.GroupName == "" && e.config.GroupMatch == "" {
+		requestParameters.Orderby = []string{"displayName asc"}
+	}
+
+	// Conditionally add Expand. Graph API does not support expanding members when using a partial-text filter.
+	if e.config.GroupMatch == "" {
+		requestParameters.Expand = []string{fmt.Sprintf("members($select=givenName,mail,surname,userPrincipalName;$top=%d)", e.config.PageSize)}
 	}
 
 	// Add filter based on provided flags
@@ -447,20 +539,20 @@ func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseabl
 			parts := strings.SplitN(sanitizedMatchStr, "*", 2)
 			startsWith := parts[0]
 			endsWith := parts[1]
-			filter = fmt.Sprintf("startsWith(tolower(displayName), '%s') and endsWith(tolower(displayName), '%s')", strings.ToLower(startsWith), strings.ToLower(endsWith))
+			filter = fmt.Sprintf("startsWith(displayName, '%s') and endsWith(displayName, '%s')", startsWith, endsWith)
 		} else if strings.HasPrefix(sanitizedMatchStr, "*") && strings.HasSuffix(sanitizedMatchStr, "*") {
 			matchType = "containing"
-			filter = fmt.Sprintf("contains(tolower(displayName), '%s')", strings.ToLower(strings.Trim(sanitizedMatchStr, "*")))
+			filter = fmt.Sprintf("contains(displayName, '%s')", strings.Trim(sanitizedMatchStr, "*"))
 		} else if strings.HasSuffix(sanitizedMatchStr, "*") {
 			matchType = "starting with"
-			filter = fmt.Sprintf("startsWith(tolower(displayName), '%s')", strings.ToLower(strings.TrimSuffix(sanitizedMatchStr, "*")))
+			filter = fmt.Sprintf("startsWith(displayName, '%s')", strings.TrimSuffix(sanitizedMatchStr, "*"))
 		} else if strings.HasPrefix(sanitizedMatchStr, "*") {
 			matchType = "ending with"
-			filter = fmt.Sprintf("endsWith(tolower(displayName), '%s')", strings.ToLower(strings.TrimPrefix(sanitizedMatchStr, "*")))
+			filter = fmt.Sprintf("endsWith(displayName, '%s')", strings.TrimPrefix(sanitizedMatchStr, "*"))
 		} else {
 			// Default to contains if no wildcards
 			matchType = "containing"
-			filter = fmt.Sprintf("contains(tolower(displayName), '%s')", strings.ToLower(sanitizedMatchStr))
+			filter = fmt.Sprintf("contains(displayName, '%s')", sanitizedMatchStr)
 		}
 		requestParameters.Filter = strPtr(filter)
 		log.Printf("Filtering for groups %s: '%s'", matchType, matchStr)
@@ -494,42 +586,6 @@ func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseabl
 }
 
 // --- Helper functions that do not depend on Extractor state ---
-
-func (e *Extractor) processUserInserts(wg *sync.WaitGroup, users <-chan SQLiteUser) {
-	defer wg.Done()
-	tx, err := e.db.BeginTx(e.ctx, nil)
-	if err != nil {
-		log.Printf("Error starting SQLite transaction for users: %v", err)
-		return
-	}
-	defer func() {
-		if err := tx.Rollback(); err != nil {
-			log.Printf("ERROR: transaction rollback failed: %v", err)
-		}
-	}()
-
-	stmt, err := tx.PrepareContext(e.ctx, "INSERT OR IGNORE INTO entraUsers (UserPrincipalName, givenName, mail, surname) VALUES (?, ?, ?, ?)")
-	if err != nil {
-		log.Printf("Error preparing SQLite user statement: %v", err)
-		return
-	}
-	defer stmt.Close()
-
-	insertCount := 0
-	for user := range users {
-		if _, err := stmt.ExecContext(e.ctx, user.UserPrincipalName, user.GivenName, user.Mail, user.Surname); err != nil {
-			log.Printf("Error executing SQLite insert for user '%s': %v", user.UserPrincipalName, err)
-			return
-		}
-		insertCount++
-	}
-
-	if err := tx.Commit(); err != nil {
-		log.Printf("Error committing SQLite user transaction: %v", err)
-	} else {
-		log.Printf("Committed %d user records to SQLite.", insertCount)
-	}
-}
 
 func main() {
 	// Load configuration from flags and config file.
