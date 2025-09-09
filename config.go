@@ -11,7 +11,7 @@ import (
 // Config holds the configuration options for the extractor.
 type Config struct {
 	AuthMethod     string `json:"auth,omitempty"`
-	TenantID       string `json:"tenantId,omitempty"`
+	TenantID       string `json:"tenantId,omitempty"` // From config file/env, used for clientid auth
 	ClientID       string `json:"clientId,omitempty"`
 	ClientSecret   string `json:"clientSecret,omitempty"`
 	PageSize       int    `json:"pageSize,omitempty"`
@@ -21,6 +21,11 @@ type Config struct {
 	GroupMatch     string `json:"groupMatch,omitempty"`
 	UseCache       string `json:"useCache,omitempty"`
 	JsonOutputFile string `json:"jsonOutputFile,omitempty"` // The full path to the JSON output file
+
+	// New flags
+	HealthCheck   bool   `json:"healthCheck,omitempty"`
+	GroupListOnly bool   `json:"groupListOnly,omitempty"`
+	TenantIDFlag  string `json:"tenantIdFlag,omitempty"` // From -tenantid flag, overrides all
 }
 
 // LoadConfig loads the application's configuration from command-line flags
@@ -37,6 +42,10 @@ func LoadConfig() (Config, error) {
 	outputID := flag.String("output-id", "", "Custom ID for output filenames (e.g., 'my-export').")
 	groupName := flag.String("group-name", "", "Exact name of a single group (e.g., 'MyGroup') or a comma-separated list (e.g., 'Group1,Group2') to process.")
 	groupMatch := flag.String("group-match", "", "Partial match for a group name. Use '*' as a wildcard. E.g., 'Proj*', '*Test*', 'Start*End'. Defaults to 'contains' if no wildcards. Quote argument to avoid shell globbing.")
+	// New flags
+	healthCheck := flag.Bool("healthcheck", false, "Check connectivity and authentication, then exit.")
+	groupListOnly := flag.Bool("group-list-only", false, "List groups only; do not fetch members.")
+	tenantID := flag.String("tenantid", "", "Optional: Force a specific tenant ID, overriding auto-detection or config file.")
 
 	// Custom usage message
 	flag.Usage = func() {
@@ -55,13 +64,16 @@ func LoadConfig() (Config, error) {
 	// --- Configuration Loading & Merging ---
 	// Start with default values from the flags themselves.
 	config := Config{
-		AuthMethod:   *auth,
-		PageSize:     *pageSize,
-		ParallelJobs: *parallelJobs,
-		OutputID:     *outputID,
-		GroupName:    *groupName,
-		GroupMatch:   *groupMatch,
-		UseCache:     *useCache,
+		AuthMethod:    *auth,
+		PageSize:      *pageSize,
+		ParallelJobs:  *parallelJobs,
+		OutputID:      *outputID,
+		GroupName:     *groupName,
+		GroupMatch:    *groupMatch,
+		UseCache:      *useCache,
+		HealthCheck:   *healthCheck,
+		GroupListOnly: *groupListOnly,
+		TenantIDFlag:  *tenantID,
 	}
 
 	// Load from config file if provided. This overwrites the defaults.
@@ -113,8 +125,22 @@ func LoadConfig() (Config, error) {
 	if isSet["use-cache"] {
 		config.UseCache = *useCache
 	}
+	if isSet["healthcheck"] {
+		config.HealthCheck = *healthCheck
+	}
+	if isSet["group-list-only"] {
+		config.GroupListOnly = *groupListOnly
+	}
+	if isSet["tenantid"] {
+		config.TenantIDFlag = *tenantID
+	}
 
 	// --- Validation ---
+	if config.HealthCheck {
+		// If healthcheck is true, no other flags should be processed for validation.
+		return config, nil
+	}
+
 	if config.UseCache != "" {
 		if _, err := os.Stat(config.UseCache); os.IsNotExist(err) {
 			return Config{}, fmt.Errorf("cache file does not exist: %s", config.UseCache)
