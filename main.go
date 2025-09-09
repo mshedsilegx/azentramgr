@@ -278,7 +278,9 @@ func (e *Extractor) processDBWrites(wg *sync.WaitGroup, requests <-chan DBWriteR
 	// Use a deferred function to ensure the transaction is rolled back on any error path.
 	defer func() {
 		if p := recover(); p != nil {
-			tx.Rollback()
+			if rbErr := tx.Rollback(); rbErr != nil {
+				log.Printf("ERROR: transaction rollback failed during panic recovery: %v", rbErr)
+			}
 			panic(p) // re-throw panic after Rollback
 		} else if err != nil {
 			if rbErr := tx.Rollback(); rbErr != nil {
