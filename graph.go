@@ -16,6 +16,7 @@ type JSONMember struct {
 	Mail              string `json:"mail,omitempty"`
 	Surname           string `json:"surname,omitempty"`
 	UserPrincipalName string `json:"userPrincipalName"`
+	IsEnabled         *bool  `json:"isEnabled,omitempty"`
 }
 
 // JSONGroup represents the structure for each group in the final JSON output.

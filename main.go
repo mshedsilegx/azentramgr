@@ -25,6 +25,7 @@ import (
 	msgraphgocore "github.com/microsoftgraph/msgraph-sdk-go-core"
 	"github.com/microsoftgraph/msgraph-sdk-go/groups"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
+	"github.com/microsoftgraph/msgraph-sdk-go/models/odataerrors"
 )
 
 var version = "dev"
@@ -233,6 +234,23 @@ func (e *Extractor) getGroupIterator() (*msgraphgocore.PageIterator[*models.Grou
 	return msgraphgocore.NewPageIterator[*models.Group](result, e.client.GetAdapter(), models.CreateGroupCollectionResponseFromDiscriminatorValue)
 }
 
+func (e *Extractor) getUser() (string, error) {
+	// Request the user's profile.
+	// Note: We cannot use $select here as the Get method for the MeRequestBuilder
+	// in this SDK version does not appear to support a configuration object.
+	user, err := e.client.Me().Get(e.ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to get current user: %w", err)
+	}
+
+	displayName := user.GetDisplayName()
+	if displayName == nil {
+		return "N/A", nil // Should not happen in normal circumstances
+	}
+
+	return *displayName, nil
+}
+
 func streamJsonToFile(wg *sync.WaitGroup, results <-chan JSONGroup, outputFile string) {
 	defer wg.Done()
 	file, err := os.Create(outputFile)
@@ -295,7 +313,7 @@ func (e *Extractor) processDBWrites(wg *sync.WaitGroup, requests <-chan DBWriteR
 		}
 	}()
 
-	userStmt, err := tx.PrepareContext(e.ctx, "INSERT OR IGNORE INTO entraUsers (UserPrincipalName, givenName, mail, surname) VALUES (?, ?, ?, ?)")
+	userStmt, err := tx.PrepareContext(e.ctx, "INSERT OR IGNORE INTO entraUsers (UserPrincipalName, givenName, mail, surname, isEnabled) VALUES (?, ?, ?, ?, ?)")
 	if err != nil {
 		log.Printf("Error preparing SQLite user statement: %v", err)
 		return
@@ -315,7 +333,7 @@ func (e *Extractor) processDBWrites(wg *sync.WaitGroup, requests <-chan DBWriteR
 	for req := range requests {
 		switch req.Type {
 		case UserRequest:
-			if _, err = userStmt.ExecContext(e.ctx, req.User.UserPrincipalName, req.User.GivenName, req.User.Mail, req.User.Surname); err != nil {
+			if _, err = userStmt.ExecContext(e.ctx, req.User.UserPrincipalName, req.User.GivenName, req.User.Mail, req.User.Surname, req.User.IsEnabled); err != nil {
 				log.Printf("Error executing SQLite insert for user '%s': %v", req.User.UserPrincipalName, err)
 				return // Abort on first error
 			}
@@ -364,18 +382,21 @@ func (e *Extractor) processMembers(members []models.DirectoryObjectable) ([]JSON
 			if val := m.GetSurname(); val != nil {
 				surname = *val
 			}
+			isEnabled := m.GetAccountEnabled() // This returns *bool
 
 			jsonMembers = append(jsonMembers, JSONMember{
 				GivenName:         givenName,
 				Mail:              mail,
 				Surname:           surname,
 				UserPrincipalName: upn,
+				IsEnabled:         isEnabled,
 			})
 			sqliteUsers = append(sqliteUsers, SQLiteUser{
 				UserPrincipalName: upn,
 				GivenName:         givenName,
 				Mail:              mail,
 				Surname:           surname,
+				IsEnabled:         isEnabled != nil && *isEnabled, // Dereference pointer for SQLite
 			})
 			groupMemberLinks = append(groupMemberLinks, upn)
 
@@ -409,6 +430,11 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 			log.Printf("[Processed: %d] Data extraction for group %s", currentCount, groupName)
 		}
 
+		if e.config.GroupListOnly {
+			jsonResults <- JSONGroup{ADGroupName: groupName, ADGroupMemberName: nil}
+			continue
+		}
+
 		var allJsonMembers []JSONMember
 
 		processAndDispatch := func(members []models.DirectoryObjectable) {
@@ -425,10 +451,8 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 		// --- Member Processing Logic ---
 		// This block is wrapped in a mutex to prevent race conditions in the
 		// underlying Azure CLI credential provider when running with high concurrency.
-		func() {
-			e.apiMutex.Lock()
-			defer e.apiMutex.Unlock()
-
+		// This should only apply to `azidentity` auth.
+		memberProcessingFunc := func() {
 			var initialMembers []models.DirectoryObjectable
 			var nextLink *string
 
@@ -449,7 +473,7 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 				headers := abstractions.NewRequestHeaders()
 				headers.Add("ConsistencyLevel", "eventual")
 				requestParameters := &groups.ItemMembersRequestBuilderGetQueryParameters{
-					Select: []string{"givenName", "mail", "surname", "userPrincipalName"},
+					Select: []string{"givenName", "mail", "surname", "userPrincipalName", "accountEnabled"},
 					Top:    int32Ptr(e.config.PageSize),
 				}
 				options := &groups.ItemMembersRequestBuilderGetRequestConfiguration{
@@ -488,7 +512,15 @@ func (e *Extractor) worker(wg *sync.WaitGroup, groupTasks <-chan *models.Group, 
 				processAndDispatch(result.GetValue())
 				nextLink = result.GetOdataNextLink()
 			}
-		}()
+		}
+
+		if e.config.AuthMethod == "azidentity" {
+			e.apiMutex.Lock()
+			memberProcessingFunc()
+			e.apiMutex.Unlock()
+		} else {
+			memberProcessingFunc()
+		}
 
 		jsonResults <- JSONGroup{ADGroupName: groupName, ADGroupMemberName: allJsonMembers}
 	}
@@ -507,7 +539,7 @@ func (e *Extractor) getGroupsWithLoginRetry() (models.GroupCollectionResponseabl
 
 	// Conditionally add Expand. Graph API does not support expanding members when using a partial-text filter.
 	if e.config.GroupMatch == "" {
-		requestParameters.Expand = []string{fmt.Sprintf("members($select=givenName,mail,surname,userPrincipalName;$top=%d)", e.config.PageSize)}
+		requestParameters.Expand = []string{fmt.Sprintf("members($select=givenName,mail,surname,userPrincipalName,accountEnabled;$top=%d)", e.config.PageSize)}
 	}
 
 	// Add filter based on provided flags
@@ -594,6 +626,11 @@ func main() {
 		log.Fatal(err)
 	}
 
+	if config.HealthCheck {
+		runHealthCheck(config)
+		return
+	}
+
 	if config.UseCache != "" {
 		if err := runFromCache(config); err != nil {
 			log.Fatalf("Application failed while running from cache: %v", err)
@@ -610,21 +647,38 @@ func main() {
 
 	switch config.AuthMethod {
 	case "azidentity":
-		cred, err = azidentity.NewAzureCLICredential(nil)
-		if err != nil {
-			log.Fatalf("Error creating Azure CLI credential: %v", err)
-		}
-		// Get Tenant ID for DB naming
-		tenantID, err = getTenantID(ctx, cred)
-		if err != nil {
-			log.Fatalf("Error getting tenant ID: %v", err)
+		if config.TenantIDFlag != "" {
+			log.Printf("Using tenant ID from -tenantid flag: %s", config.TenantIDFlag)
+			tenantID = config.TenantIDFlag
+			opts := &azidentity.AzureCLICredentialOptions{TenantID: tenantID}
+			cred, err = azidentity.NewAzureCLICredential(opts)
+			if err != nil {
+				log.Fatalf("Error creating Azure CLI credential for tenant %s: %v", tenantID, err)
+			}
+		} else {
+			cred, err = azidentity.NewAzureCLICredential(nil)
+			if err != nil {
+				log.Fatalf("Error creating Azure CLI credential: %v", err)
+			}
+			// Get Tenant ID for DB naming
+			tenantID, err = getTenantID(ctx, cred)
+			if err != nil {
+				log.Fatalf("Error getting tenant ID: %v", err)
+			}
+			log.Printf("Auto-detected tenant ID: %s", tenantID)
 		}
 	case "clientid":
-		cred, err = azidentity.NewClientSecretCredential(config.TenantID, config.ClientID, config.ClientSecret, nil)
+		// The -tenantid flag overrides the tenant ID from the config file/env.
+		if config.TenantIDFlag != "" {
+			tenantID = config.TenantIDFlag
+			log.Printf("Using tenant ID from -tenantid flag: %s (overriding config/env)", tenantID)
+		} else {
+			tenantID = config.TenantID
+		}
+		cred, err = azidentity.NewClientSecretCredential(tenantID, config.ClientID, config.ClientSecret, nil)
 		if err != nil {
 			log.Fatalf("Error creating client secret credential: %v", err)
 		}
-		tenantID = config.TenantID
 	default:
 		log.Fatalf("Unknown authentication method: %s", config.AuthMethod)
 	}
@@ -660,4 +714,88 @@ func main() {
 	if err := extractor.Run(); err != nil {
 		log.Fatalf("Application failed: %v", err)
 	}
+}
+
+func runHealthCheck(config Config) {
+	ctx := context.Background()
+	var cred azcore.TokenCredential
+	var tenantID string
+	var err error
+
+	// --- Authentication ---
+	switch config.AuthMethod {
+	case "azidentity":
+		if config.TenantIDFlag != "" {
+			tenantID = config.TenantIDFlag
+			opts := &azidentity.AzureCLICredentialOptions{TenantID: tenantID}
+			cred, err = azidentity.NewAzureCLICredential(opts)
+			if err != nil {
+				log.Fatalf("Error creating Azure CLI credential for tenant %s: %v", tenantID, err)
+			}
+		} else {
+			cred, err = azidentity.NewAzureCLICredential(nil)
+			if err != nil {
+				log.Fatalf("Error creating Azure CLI credential: %v", err)
+			}
+			tenantID, err = getTenantID(ctx, cred)
+			if err != nil {
+				log.Fatalf("Error getting tenant ID: %v", err)
+			}
+		}
+	case "clientid":
+		if config.TenantIDFlag != "" {
+			tenantID = config.TenantIDFlag
+		} else {
+			tenantID = config.TenantID
+		}
+		cred, err = azidentity.NewClientSecretCredential(tenantID, config.ClientID, config.ClientSecret, nil)
+		if err != nil {
+			log.Fatalf("Error creating client secret credential: %v", err)
+		}
+	default:
+		log.Fatalf("Unknown authentication method: %s", config.AuthMethod)
+	}
+
+	// --- API Calls ---
+	client, err := msgraphsdk.NewGraphServiceClientWithCredentials(cred, nil)
+	if err != nil {
+		log.Fatalf("Error creating Graph client: %v", err)
+	}
+	extractor, err := NewExtractor(ctx, config, client, nil, tenantID) // DB is nil for healthcheck
+	if err != nil {
+		log.Fatalf("Failed to initialize extractor: %v", err)
+	}
+
+	groupCount, err := extractor.getGroupCount()
+	if err != nil {
+		var odataErr *odataerrors.ODataError
+		if errors.As(err, &odataErr) {
+			// Print the main error message. The structure for detailed codes seems to have changed.
+			fmt.Fprintf(os.Stderr, "API Error: %s\n", odataErr.Error())
+		} else {
+			fmt.Fprintf(os.Stderr, "Error getting group count: %v\n", err)
+		}
+		os.Exit(1)
+	}
+
+	userName, err := extractor.getUser()
+	if err != nil {
+		var odataErr *odataerrors.ODataError
+		if errors.As(err, &odataErr) {
+			// Print the main error message.
+			fmt.Fprintf(os.Stderr, "API Error: %s\n", odataErr.Error())
+		} else {
+			fmt.Fprintf(os.Stderr, "Error getting user: %v\n", err)
+		}
+		os.Exit(1)
+	}
+
+	// --- Success ---
+	result := map[string]interface{}{
+		"groupCount":  groupCount,
+		"tenantId":    tenantID,
+		"currentUser": userName,
+	}
+	jsonResult, _ := json.MarshalIndent(result, "", "  ")
+	fmt.Println(string(jsonResult))
 }

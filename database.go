@@ -21,6 +21,7 @@ type SQLiteUser struct {
 	GivenName         string
 	Mail              string
 	Surname           string
+	IsEnabled         bool
 }
 
 func setupDatabase(ctx context.Context, dbName string) (*sql.DB, error) {
@@ -44,7 +45,7 @@ func setupDatabase(ctx context.Context, dbName string) (*sql.DB, error) {
 	}
 
 	// New table for user details
-	createUsersTableSQL := `CREATE TABLE IF NOT EXISTS entraUsers (UserPrincipalName TEXT PRIMARY KEY, givenName TEXT, mail TEXT, surname TEXT);`
+	createUsersTableSQL := `CREATE TABLE IF NOT EXISTS entraUsers (UserPrincipalName TEXT PRIMARY KEY, givenName TEXT, mail TEXT, surname TEXT, isEnabled BOOLEAN);`
 	if _, err := db.ExecContext(ctx, createUsersTableSQL); err != nil {
 		return nil, fmt.Errorf("failed to create entraUsers table: %w", err)
 	}

@@ -45,10 +45,13 @@ The application's behavior can be customized with the following command-line fla
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `-version` | bool | `false` | Print the application version and exit. |
+| `-healthcheck` | bool | `false` | Check connectivity and authentication to the Entra Tenant and exit. |
 | `-auth` | string | `"azidentity"` | Authentication method. Can be `'azidentity'` (default, uses `'az login'`) or `'clientid'` (for non-interactive auth). |
+| `-tenantid` | string | `""` | Optional: Force a specific tenant ID, overriding auto-detection or config file values. |
 | `-config` | string | `""` | Path to a JSON configuration file. Command-line flags override file values. See the "Configuration File" section for details. |
 | `-use-cache` | string | `""` | Path to a SQLite DB file to use as a cache. If specified, all queries are run against this local DB instead of the Graph API. |
 | `-pageSize` | int | `500` | The number of items to retrieve per page for API queries. Max is 999. |
+| `-group-list-only` | bool | `false` | List groups only; do not fetch or process group members. |
 | `-parallelJobs` | int | `16` | Number of concurrent jobs for processing groups in the `-group-match` workflow. |
 | `-output-id` | string | `""` (dynamic) | Custom ID for output filenames (e.g., 'my-export'). If empty, a default ID (`<tenant_id>_<timestamp>`) is generated. |
 | `-group-name` | string | `""` | Process only groups with exact names. Provide a single name or a comma-separated list (e.g., `"UAT Users,Admins"`). This match is **case-insensitive**. |
@@ -122,6 +125,25 @@ This flag uses wildcards (`*`) to perform `contains`, `startsWith`, or `endsWith
 ```sh
 # Finds group names starting with "PROD-"
 ./azentramgr --group-match "PROD-*"
+```
+
+### Utility and Diagnostic Examples
+
+#### Health Check
+To verify connectivity and authentication without extracting any data, use the `--healthcheck` flag. This is a great way to ensure your credentials are valid.
+```sh
+./azentramgr --healthcheck
+```
+On success, it will return a JSON object with the tenant's group count, tenant ID, and the current user principal name.
+
+#### List Groups Only
+To get a list of group names without fetching their members, use the `--group-list-only` flag. This can be combined with filters.
+```sh
+# Get all group names in the tenant
+./azentramgr --group-list-only
+
+# Get names of groups starting with "PROD-"
+./azentramgr --group-list-only --group-match "PROD-*"
 ```
 
 ### Using Non-Interactive Authentication
@@ -229,4 +251,114 @@ The final configuration is determined by the following order of precedence (wher
 For example, if your `config.json` specifies `parallelJobs: 16`, running the following command will execute with 32 jobs:
 ```sh
 ./azentramgr --config /path/to/my_config.json --parallelJobs 32
+```
+
+## 6. Output Details
+
+The application generates two main output files: a SQLite database and a JSON file. Both are named using the pattern `<output-id>.db` and `<output-id>.json`.
+
+### 6.1. SQLite Database
+
+The SQLite database provides a powerful way to query the extracted data locally. It contains two main tables:
+
+#### `entraUsers` Table
+This table stores detailed information about each unique user found during the extraction.
+
+| Column | Type | Description |
+|---|---|---|
+| `UserPrincipalName` | TEXT | The unique User Principal Name (UPN) of the user. **Primary Key**. |
+| `givenName` | TEXT | The user's given (first) name. |
+| `mail` | TEXT | The user's primary email address. |
+| `surname` | TEXT | The user's surname (last name). |
+| `isEnabled` | BOOLEAN | `1` if the user account is enabled, `0` otherwise. |
+
+#### `entraGroups` Table
+This table stores the relationship between groups and their members.
+
+| Column | Type | Description |
+|---|---|---|
+| `groupName` | TEXT | The display name of the Azure AD group. |
+| `groupMember` | TEXT | The User Principal Name (UPN) of a user who is a member of the group. |
+
+#### Indexes
+To improve query performance, the following indexes are automatically created:
+- `idx_groupName` on the `entraGroups(groupName)` column.
+- `idx_groupMember` on the `entraGroups(groupMember)` column.
+- `idx_userPrincipalName` (unique) on the `entraUsers(UserPrincipalName)` column.
+
+#### Example Queries
+You can query the database directly using the `sqlite3` command-line tool.
+
+**Find all members of a specific group:**
+```sh
+sqlite3 my_export.db "SELECT groupMember FROM entraGroups WHERE groupName = 'My Production Group';"
+```
+
+**Find all groups a specific user belongs to:**
+```sh
+sqlite3 my_export.db "SELECT groupName FROM entraGroups WHERE groupMember = 'user.name@example.com';"
+```
+
+**Get detailed information for all enabled users in a group:**
+```sh
+sqlite3 my_export.db "SELECT u.* FROM entraUsers u JOIN entraGroups g ON u.UserPrincipalName = g.groupMember WHERE g.groupName = 'My Production Group' AND u.isEnabled = 1;"
+```
+
+### 6.2. JSON File
+
+The JSON file provides a human-readable, hierarchical representation of the extracted data.
+
+#### Structure Specification
+The file contains a single JSON array `[]`. Each element in the array is an object that represents a single Azure AD group.
+
+**Group Object:**
+| Key | Type | Description |
+|---|---|---|
+| `ADGroupName` | String | The display name of the Azure AD group. |
+| `ADGroupMemberName`| Array | An array of User Member objects. This array will be `null` if `--group-list-only` is used. |
+
+**User Member Object:**
+| Key | Type | Description |
+|---|---|---|
+| `givenName` | String | The user's given (first) name. |
+| `mail` | String | The user's primary email address. |
+| `surname` | String | The user's surname (last name). |
+| `userPrincipalName`| String | The unique User Principal Name (UPN) of the user. |
+| `isEnabled` | Boolean | `true` if the user account is enabled, `false` otherwise. |
+
+#### Example JSON Snippet
+```json
+[
+  {
+    "ADGroupName": "Admins",
+    "ADGroupMemberName": [
+      {
+        "givenName": "Admin",
+        "mail": "admin.user@example.com",
+        "surname": "User",
+        "userPrincipalName": "admin.user@example.com",
+        "isEnabled": true
+      }
+    ]
+  },
+  {
+    "ADGroupName": "UAT Users",
+    "ADGroupMemberName": [
+      {
+        "givenName": "Test",
+        "mail": "test.user@example.com",
+        "surname": "User",
+        "userPrincipalName": "test.user@example.com",
+        "isEnabled": false
+      },
+      {
+        "givenName": "Dev",
+        "mail": "dev.user@example.com",
+        "surname": "User",
+        "userPrincipalName": "dev.user@example.com",
+        "isEnabled": true
+      }
+    ]
+  }
+]
 ```
