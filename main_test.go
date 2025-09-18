@@ -31,18 +31,30 @@ func TestAggregatorFunctions(t *testing.T) {
 	dbFile, err := os.CreateTemp("", "test-aggregator-*.db")
 	require.NoError(t, err)
 	dbPath := dbFile.Name()
-	dbFile.Close()
-	defer os.Remove(dbPath)
+	require.NoError(t, dbFile.Close())
+	defer func() {
+		if err := os.Remove(dbPath); err != nil {
+			t.Logf("failed to remove temp db file: %v", err)
+		}
+	}()
 
 	db, err := setupDatabase(context.Background(), dbPath)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	// 3. Setup temp file for JSON output
 	tmpFile, err := os.CreateTemp("", "test-output-*.json")
 	require.NoError(t, err)
-	defer os.Remove(tmpFile.Name())
-	tmpFile.Close()
+	defer func() {
+		if err := os.Remove(tmpFile.Name()); err != nil {
+			t.Logf("failed to remove temp json file: %v", err)
+		}
+	}()
+	require.NoError(t, tmpFile.Close())
 
 	// 4. Create a minimal Extractor
 	config := Config{JsonOutputFile: tmpFile.Name()}
@@ -158,7 +170,11 @@ func TestLoadConfig(t *testing.T) {
 		// Create a temporary config file
 		configFile, err := os.CreateTemp("", "config-*.json")
 		require.NoError(t, err)
-		defer os.Remove(configFile.Name())
+		defer func() {
+			if err := os.Remove(configFile.Name()); err != nil {
+				t.Logf("failed to remove temp config file: %v", err)
+			}
+		}()
 
 		configData := map[string]string{
 			"auth":         "clientid",
@@ -169,7 +185,7 @@ func TestLoadConfig(t *testing.T) {
 		encoder := json.NewEncoder(configFile)
 		err = encoder.Encode(configData)
 		require.NoError(t, err)
-		configFile.Close()
+		require.NoError(t, configFile.Close())
 
 		os.Args = []string{"cmd", "-config", configFile.Name()}
 		config, err := LoadConfig()
@@ -224,7 +240,7 @@ func TestLoadConfig(t *testing.T) {
 		encoder := json.NewEncoder(configFile)
 		err = encoder.Encode(configData)
 		require.NoError(t, err)
-		configFile.Close()
+		require.NoError(t, configFile.Close())
 
 		os.Args = []string{
 			"cmd",
@@ -246,7 +262,7 @@ func TestLoadConfig(t *testing.T) {
 		dummyFile, err := os.CreateTemp("", "dummy-cache-*.db")
 		require.NoError(t, err)
 		defer os.Remove(dummyFile.Name())
-		dummyFile.Close()
+		require.NoError(t, dummyFile.Close())
 
 		testCases := []struct {
 			flag   string
@@ -283,7 +299,7 @@ func TestRunFromCache(t *testing.T) {
 	dbFile, err := os.CreateTemp("", "test-cache-*.db")
 	require.NoError(t, err)
 	dbPath := dbFile.Name()
-	dbFile.Close() // Close the file so the database driver can open it
+	require.NoError(t, dbFile.Close()) // Close the file so the database driver can open it
 	defer os.Remove(dbPath)
 
 	db, err := setupDatabase(ctx, dbPath)
@@ -306,21 +322,29 @@ func TestRunFromCache(t *testing.T) {
 	require.NoError(t, err)
 	userStmt, err := tx.Prepare("INSERT INTO entraUsers (userPrincipalName, givenName, mail, surname, isEnabled) VALUES (?, ?, ?, ?, ?)")
 	require.NoError(t, err)
-	defer userStmt.Close()
+	defer func() {
+		if err := userStmt.Close(); err != nil {
+			t.Logf("failed to close user statement: %v", err)
+		}
+	}()
 	for _, u := range users {
 		_, err := userStmt.Exec(u.UserPrincipalName, u.GivenName, u.Mail, u.Surname, u.IsEnabled)
 		require.NoError(t, err)
 	}
 	groupStmt, err := tx.Prepare("INSERT INTO entraGroups (groupName, groupMember) VALUES (?, ?)")
 	require.NoError(t, err)
-	defer groupStmt.Close()
+	defer func() {
+		if err := groupStmt.Close(); err != nil {
+			t.Logf("failed to close group statement: %v", err)
+		}
+	}()
 	for _, g := range groups {
 		_, err := groupStmt.Exec(g.GroupName, g.MemberName)
 		require.NoError(t, err)
 	}
 	err = tx.Commit()
 	require.NoError(t, err)
-	db.Close() // Close the db so the function can reopen it
+	require.NoError(t, db.Close()) // Close the db so the function can reopen it
 
 	// --- 3. Define and run test cases ---
 	testCases := []struct {

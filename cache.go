@@ -30,7 +30,11 @@ func runFromCache(config Config) error {
 	if err != nil {
 		return fmt.Errorf("failed to open cache database: %w", err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Printf("Error closing database: %v", err)
+		}
+	}()
 
 	// --- 3. Build the SQL query ---
 	query := `
@@ -72,7 +76,11 @@ func runFromCache(config Config) error {
 	if err != nil {
 		return fmt.Errorf("failed to execute query on cache: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			log.Printf("Error closing rows: %v", err)
+		}
+	}()
 
 	// --- 5. Process and stream results ---
 	jsonResults := make(chan JSONGroup, 100)
