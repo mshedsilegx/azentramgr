@@ -431,7 +431,11 @@ func TestRunFromCache(t *testing.T) {
 
 			// --- 5. Verify the JSON output ---
 			jsonFile := tc.config.OutputID + ".json"
-			defer os.Remove(jsonFile)
+			defer func() {
+				if err := os.Remove(jsonFile); err != nil {
+					t.Logf("failed to remove temp json file: %v", err)
+				}
+			}()
 
 			content, err := os.ReadFile(jsonFile)
 			require.NoError(t, err)
