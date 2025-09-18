@@ -75,7 +75,11 @@ type DBWriteRequest struct {
 
 // Run executes the main logic of the extractor.
 func (e *Extractor) Run() error {
-	defer e.db.Close()
+	defer func() {
+		if err := e.db.Close(); err != nil {
+			log.Printf("Error closing database: %v", err)
+		}
+	}()
 
 	// 1. Get total count of groups for progress reporting.
 	// The Graph API's $count endpoint does not support complex filters like startsWith,
@@ -258,10 +262,18 @@ func streamJsonToFile(wg *sync.WaitGroup, results <-chan JSONGroup, outputFile s
 		log.Printf("Error creating JSON output file: %v", err)
 		return
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			log.Printf("Error closing file %s: %v", outputFile, err)
+		}
+	}()
 
 	writer := bufio.NewWriter(file)
-	defer writer.Flush() // Important: ensure buffer is written at the end
+	defer func() {
+		if err := writer.Flush(); err != nil {
+			log.Printf("Error flushing writer for file %s: %v", outputFile, err)
+		}
+	}()
 
 	if _, err := writer.WriteString("[\n"); err != nil {
 		log.Printf("Error writing opening bracket to JSON file: %v", err)
@@ -318,14 +330,22 @@ func (e *Extractor) processDBWrites(wg *sync.WaitGroup, requests <-chan DBWriteR
 		log.Printf("Error preparing SQLite user statement: %v", err)
 		return
 	}
-	defer userStmt.Close()
+	defer func() {
+		if err := userStmt.Close(); err != nil {
+			log.Printf("Error closing user statement: %v", err)
+		}
+	}()
 
 	groupStmt, err := tx.PrepareContext(e.ctx, "INSERT INTO entraGroups (groupName, groupMember) VALUES (?, ?)")
 	if err != nil {
 		log.Printf("Error preparing SQLite group statement: %v", err)
 		return
 	}
-	defer groupStmt.Close()
+	defer func() {
+		if err := groupStmt.Close(); err != nil {
+			log.Printf("Error closing group statement: %v", err)
+		}
+	}()
 
 	userInsertCount := 0
 	groupInsertCount := 0
