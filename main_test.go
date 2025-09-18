@@ -229,7 +229,11 @@ func TestLoadConfig(t *testing.T) {
 		// Create a temporary config file
 		configFile, err := os.CreateTemp("", "config-*.json")
 		require.NoError(t, err)
-		defer os.Remove(configFile.Name())
+		defer func() {
+			if err := os.Remove(configFile.Name()); err != nil {
+				t.Logf("failed to remove temp config file: %v", err)
+			}
+		}()
 		configData := map[string]interface{}{
 			"auth":     "clientid",
 			"tenantId": "file_tenant",
@@ -261,7 +265,11 @@ func TestLoadConfig(t *testing.T) {
 		// Create a dummy file to pass the existence check
 		dummyFile, err := os.CreateTemp("", "dummy-cache-*.db")
 		require.NoError(t, err)
-		defer os.Remove(dummyFile.Name())
+		defer func() {
+			if err := os.Remove(dummyFile.Name()); err != nil {
+				t.Logf("failed to remove temp dummy file: %v", err)
+			}
+		}()
 		require.NoError(t, dummyFile.Close())
 
 		testCases := []struct {
@@ -300,7 +308,11 @@ func TestRunFromCache(t *testing.T) {
 	require.NoError(t, err)
 	dbPath := dbFile.Name()
 	require.NoError(t, dbFile.Close()) // Close the file so the database driver can open it
-	defer os.Remove(dbPath)
+	defer func() {
+		if err := os.Remove(dbPath); err != nil {
+			t.Logf("failed to remove temp cache db: %v", err)
+		}
+	}()
 
 	db, err := setupDatabase(ctx, dbPath)
 	require.NoError(t, err)
