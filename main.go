@@ -1,6 +1,6 @@
-// main.go is the entry point for the azentramgr tool. It handles configuration 
-// loading, authentication (Azure CLI or Client Secret), and orchestrates 
-// the parallel extraction of groups and their members from Entra ID into 
+// main.go is the entry point for the azentramgr tool. It handles configuration
+// loading, authentication (Azure CLI or Client Secret), and orchestrates
+// the parallel extraction of groups and their members from Entra ID into
 // both a local SQLite database and a JSON report.
 package main
 
@@ -263,7 +263,7 @@ func (e *Extractor) getUser() (string, error) {
 	return *displayName, nil
 }
 
-// streamJsonToFile reads JSONGroup objects from a channel and writes them 
+// streamJsonToFile reads JSONGroup objects from a channel and writes them
 // to a formatted JSON array in the specified output file.
 func streamJsonToFile(wg *sync.WaitGroup, results <-chan JSONGroup, outputFile string) {
 	defer wg.Done()

@@ -1,5 +1,5 @@
-// graph.go provides helper functions and data structures for interacting with 
-// the Microsoft Graph API and processing its results. It includes logic for 
+// graph.go provides helper functions and data structures for interacting with
+// the Microsoft Graph API and processing its results. It includes logic for
 // handling Graph-specific data types and extracting metadata from authentication tokens.
 package main
 
@@ -28,7 +28,7 @@ type JSONGroup struct {
 	ADGroupMemberName []JSONMember `json:"ADGroupMemberName,omitempty"` // Use omitempty to hide if nil/empty
 }
 
-// int32Ptr converts an int to an *int32. It includes a safety check to prevent 
+// int32Ptr converts an int to an *int32. It includes a safety check to prevent
 // integer overflow when converting from the platform-dependent int type to int32.
 func int32Ptr(i int) *int32 {
 	if i > 2147483647 || i < -2147483648 {
