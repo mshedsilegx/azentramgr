@@ -1,3 +1,7 @@
+// main.go is the entry point for the azentramgr tool. It handles configuration 
+// loading, authentication (Azure CLI or Client Secret), and orchestrates 
+// the parallel extraction of groups and their members from Entra ID into 
+// both a local SQLite database and a JSON report.
 package main
 
 import (
@@ -73,7 +77,11 @@ type DBWriteRequest struct {
 	GroupMember SQLiteGroupMember
 }
 
-// Run executes the main logic of the extractor.
+// Run executes the main logic of the extractor:
+// 1. Fetches the total group count (if possible).
+// 2. Initializes workers for parallel member processing.
+// 3. Dispatches groups to workers via a channel.
+// 4. Aggregates results into SQLite and JSON.
 func (e *Extractor) Run() error {
 	defer func() {
 		if err := e.db.Close(); err != nil {
@@ -255,9 +263,11 @@ func (e *Extractor) getUser() (string, error) {
 	return *displayName, nil
 }
 
+// streamJsonToFile reads JSONGroup objects from a channel and writes them 
+// to a formatted JSON array in the specified output file.
 func streamJsonToFile(wg *sync.WaitGroup, results <-chan JSONGroup, outputFile string) {
 	defer wg.Done()
-	file, err := os.Create(outputFile)
+	file, err := os.Create(outputFile) // #nosec G304
 	if err != nil {
 		log.Printf("Error creating JSON output file: %v", err)
 		return

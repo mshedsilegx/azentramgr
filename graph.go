@@ -1,3 +1,6 @@
+// graph.go provides helper functions and data structures for interacting with 
+// the Microsoft Graph API and processing its results. It includes logic for 
+// handling Graph-specific data types and extracting metadata from authentication tokens.
 package main
 
 import (
@@ -25,15 +28,24 @@ type JSONGroup struct {
 	ADGroupMemberName []JSONMember `json:"ADGroupMemberName,omitempty"` // Use omitempty to hide if nil/empty
 }
 
+// int32Ptr converts an int to an *int32. It includes a safety check to prevent 
+// integer overflow when converting from the platform-dependent int type to int32.
 func int32Ptr(i int) *int32 {
+	if i > 2147483647 || i < -2147483648 {
+		panic(fmt.Sprintf("int32 overflow: %d", i))
+	}
 	v := int32(i)
 	return &v
 }
 
+// strPtr is a helper that returns a pointer to the provided string.
 func strPtr(s string) *string {
 	return &s
 }
 
+// getTenantID extracts the Tenant ID (tid) from an Azure AD access token.
+// It acquires a token for the Graph API and parses its claims without verification,
+// as the token is received directly from a trusted source (Azure AD).
 func getTenantID(ctx context.Context, cred azcore.TokenCredential) (string, error) {
 	token, err := cred.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{"https://graph.microsoft.com/.default"}})
 	if err != nil {

@@ -1,3 +1,6 @@
+// cache.go implements functionality to query and process data from a local 
+// SQLite cache. This allows the application to generate reports and 
+// filtered views of Entra ID data without making live API calls to Microsoft Graph.
 package main
 
 import (
@@ -12,6 +15,9 @@ import (
 	_ "github.com/glebarez/sqlite"
 )
 
+// runFromCache is the entry point for running the tool in cache-only mode.
+// It opens an existing SQLite database, constructs a query based on user 
+// filters (group name or partial match), and streams the results to a JSON file.
 func runFromCache(config Config) error {
 	// --- 1. Print informational messages ---
 	fileInfo, err := os.Stat(config.UseCache)
@@ -65,6 +71,7 @@ func runFromCache(config Config) error {
 	}
 
 	if len(whereClauses) > 0 {
+		// #nosec G202
 		query += " WHERE " + strings.Join(whereClauses, " AND ")
 	}
 	query += " ORDER BY g.groupName, u.userPrincipalName;"
